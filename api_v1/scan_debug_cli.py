@@ -66,7 +66,7 @@ def main() -> int:
     parser.add_argument("--col", type=int, default=0)
     parser.add_argument("--run-dir", default=f"api_v1/runs/run_{time.strftime('%Y%m%d_%H%M%S_IST')}")
     parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument("--attempts", type=int, default=3)
+    parser.add_argument("--attempts", type=int, default=int(os.environ.get("SCAN_DEBUG_ATTEMPTS", "3")))
     parser.add_argument("--confirm-reads", type=int, default=10)
     parser.add_argument("--shunt-ohms", type=float, default=470.0)
 

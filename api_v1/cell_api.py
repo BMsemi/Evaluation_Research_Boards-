@@ -348,9 +348,21 @@ class ScanDebugCellAPI:
             self._append_manifest(index, stage, kind, result, bitstream, bits_lsb(packet))
             return result
 
-        remote_output_dir = self._capture_remote(packet, rails, bitstream, index, kind)
-        local_output_dir = self._copy_capture(remote_output_dir, index, kind, rails)
-        summary = self._summarize_capture(index, stage, kind, packet, rails, remote_output_dir, local_output_dir)
+        summary_errors: list[str] = []
+        for attempt in range(1, max(1, self.config.attempts) + 1):
+            remote_output_dir = self._capture_remote(packet, rails, bitstream, index, kind)
+            local_output_dir = self._copy_capture(remote_output_dir, index, kind, rails)
+            try:
+                summary = self._summarize_capture(index, stage, kind, packet, rails, remote_output_dir, local_output_dir)
+                break
+            except RuntimeError as exc:
+                summary_errors.append(f"attempt={attempt}: {exc}")
+                if attempt >= max(1, self.config.attempts):
+                    raise RuntimeError(
+                        f"capture summary failed index={index} kind={kind} after {attempt} attempts:\n"
+                        + "\n".join(summary_errors)
+                    ) from exc
+                time.sleep(2.0)
         result = CellOperationResult(
             cell=cell,
             operation=operation,
@@ -448,18 +460,33 @@ exit
         env_text = " ".join(f"{k}={self._sh_quote(v)}" for k, v in env.items())
         capture_cmd = f"cd {self.config.saleae_dir} && env {env_text} {self.config.saleae_capture_script}"
         capture_log = self.config.run_dir / f"capture_{index}_{kind}.log"
-        capture_proc = self._popen_saleae(capture_cmd)
-        time.sleep(2.0)
-        program_rc = self._program_fpga(bitstream)
-        output, _ = capture_proc.communicate()
-        capture_log.write_text(output or "")
-        remote_output_dir = ""
-        for line in (output or "").splitlines():
-            if line.startswith("OUTPUT_DIR="):
-                remote_output_dir = line.split("=", 1)[1].strip()
-        if capture_proc.returncode != 0 or program_rc != 0 or not remote_output_dir:
-            raise RuntimeError(f"capture/program failed index={index} kind={kind}; see {capture_log}")
-        return remote_output_dir
+        attempts = max(1, self.config.attempts)
+        failures: list[str] = []
+        for attempt in range(1, attempts + 1):
+            attempt_log = capture_log if attempts == 1 else self.config.run_dir / f"capture_{index}_{kind}_attempt{attempt}.log"
+            capture_proc = self._popen_saleae(capture_cmd)
+            time.sleep(2.0)
+            program_rc = self._program_fpga(bitstream)
+            output, _ = capture_proc.communicate()
+            attempt_log.write_text(output or "")
+            remote_output_dir = ""
+            for line in (output or "").splitlines():
+                if line.startswith("OUTPUT_DIR="):
+                    remote_output_dir = line.split("=", 1)[1].strip()
+            if capture_proc.returncode == 0 and program_rc == 0 and remote_output_dir:
+                if attempts > 1:
+                    capture_log.write_text(f"SUCCESS attempt={attempt}; see {attempt_log}\n")
+                return remote_output_dir
+
+            failures.append(
+                f"attempt={attempt} capture_rc={capture_proc.returncode} program_rc={program_rc} "
+                f"remote_output_dir={remote_output_dir or '<missing>'} log={attempt_log}"
+            )
+            if attempt < attempts:
+                time.sleep(2.0)
+
+        capture_log.write_text("\n".join(failures) + "\n")
+        raise RuntimeError(f"capture/program failed index={index} kind={kind} after {attempts} attempts; see {capture_log}")
 
     def _program_fpga(self, bitstream: str) -> int:
         if self.config.zynq_os == "windows":

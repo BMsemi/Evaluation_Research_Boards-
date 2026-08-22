@@ -41,6 +41,8 @@ def build_config(args: argparse.Namespace) -> ScanDebugConfig:
         vivado_cmd=args.vivado_cmd,
         saleae_host=args.saleae_host or None,
         saleae_dir=args.saleae_dir,
+        saleae_restart_script=args.saleae_restart_script,
+        saleae_restart_wait_seconds=args.saleae_restart_wait_seconds,
         adc_dac_port=args.adc_dac_port,
         set_sweep=SweepConfig.from_ranges(
             vcc_set_v=parse_sweep(args.set_vcc_set),
@@ -86,6 +88,8 @@ def main() -> int:
     parser.add_argument("--vivado-cmd", default=os.environ.get("SCAN_DEBUG_VIVADO_CMD", "C:/Xilinx/Vivado/2019.1/bin/vivado.bat"))
     parser.add_argument("--saleae-host", default=os.environ.get("SCAN_DEBUG_SALEAE_HOST", "ubuntu-24-04@100.98.132.51"))
     parser.add_argument("--saleae-dir", default=os.environ.get("SCAN_DEBUG_SALEAE_DIR", "/home/ubuntu-24-04/saleae-api"))
+    parser.add_argument("--saleae-restart-script", default=os.environ.get("SCAN_DEBUG_SALEAE_RESTART_SCRIPT", "./start-logic2-automation.sh"))
+    parser.add_argument("--saleae-restart-wait-seconds", type=float, default=float(os.environ.get("SCAN_DEBUG_SALEAE_RESTART_WAIT_SECONDS", "10")))
     parser.add_argument(
         "--adc-dac-port",
         default=os.environ.get("SCAN_DEBUG_ADC_DAC_PORT", "/dev/serial/by-id/usb-Teensyduino_USB_Serial_8829000-if00"),

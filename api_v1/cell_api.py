@@ -136,6 +136,8 @@ class ScanDebugConfig:
     saleae_host: str | None = "ubuntu-24-04@100.98.132.51"
     saleae_dir: str = "/home/ubuntu-24-04/saleae-api"
     saleae_capture_script: str = ".venv/bin/python run_fpga_scan0000_la12_15_capture.py"
+    saleae_restart_script: str = "./start-logic2-automation.sh"
+    saleae_restart_wait_seconds: float = 10.0
     adc_dac_port: str = "/dev/serial/by-id/usb-Teensyduino_USB_Serial_8829000-if00"
     summarizer: Path = DEFAULT_SUMMARIZER
 
@@ -462,6 +464,7 @@ exit
         capture_log = self.config.run_dir / f"capture_{index}_{kind}.log"
         attempts = max(1, self.config.attempts)
         failures: list[str] = []
+        restarted_saleae = False
         for attempt in range(1, attempts + 1):
             attempt_log = capture_log if attempts == 1 else self.config.run_dir / f"capture_{index}_{kind}_attempt{attempt}.log"
             capture_proc = self._popen_saleae(capture_cmd)
@@ -483,10 +486,42 @@ exit
                 f"remote_output_dir={remote_output_dir or '<missing>'} log={attempt_log}"
             )
             if attempt < attempts:
+                if not restarted_saleae and self._saleae_needs_restart(output or ""):
+                    restart_log = self._restart_saleae_automation(index, kind, attempt)
+                    failures.append(f"saleae_restart_after_attempt={attempt} log={restart_log}")
+                    restarted_saleae = True
                 time.sleep(2.0)
 
         capture_log.write_text("\n".join(failures) + "\n")
         raise RuntimeError(f"capture/program failed index={index} kind={kind} after {attempts} attempts; see {capture_log}")
+
+    def _saleae_needs_restart(self, output: str) -> bool:
+        restart_markers = (
+            "Failed to connect to remote host: Connection refused",
+            "Connection refused",
+            "DeviceSetupFailure",
+            "failed to connect to all addresses",
+        )
+        return any(marker in output for marker in restart_markers)
+
+    def _restart_saleae_automation(self, index: int, kind: str, attempt: int) -> Path:
+        restart_log = self.config.run_dir / f"saleae_restart_{index}_{kind}_after_attempt{attempt}.log"
+        command = self.config.saleae_restart_script
+        if self.config.saleae_host:
+            proc = self.runner.ssh(
+                self.config.saleae_host,
+                f"cd {self.config.saleae_dir} && {command}; sleep {self.config.saleae_restart_wait_seconds}; ss -ltnp | grep 10430 || true",
+                timeout_s=60,
+            )
+        else:
+            proc = self.runner.run(
+                self._local_shell_command(
+                    f"cd {self.config.saleae_dir} && {command}; sleep {self.config.saleae_restart_wait_seconds}; ss -ltnp | grep 10430 || true"
+                ),
+                timeout_s=60,
+            )
+        restart_log.write_text(proc.stdout or "")
+        return restart_log
 
     def _program_fpga(self, bitstream: str) -> int:
         if self.config.zynq_os == "windows":

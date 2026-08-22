@@ -247,6 +247,8 @@ The CLI reads these environment variables when matching command-line flags are n
 | `SCAN_DEBUG_VIVADO_CMD` | `--vivado-cmd` | `C:/Xilinx/Vivado/2019.1/bin/vivado.bat` |
 | `SCAN_DEBUG_SALEAE_HOST` | `--saleae-host` | `ubuntu-24-04@100.98.132.51` |
 | `SCAN_DEBUG_SALEAE_DIR` | `--saleae-dir` | `/home/ubuntu-24-04/saleae-api` |
+| `SCAN_DEBUG_SALEAE_RESTART_SCRIPT` | `--saleae-restart-script` | `./start-logic2-automation.sh` |
+| `SCAN_DEBUG_SALEAE_RESTART_WAIT_SECONDS` | `--saleae-restart-wait-seconds` | `10` |
 | `SCAN_DEBUG_ADC_DAC_PORT` | `--adc-dac-port` | `/dev/serial/by-id/usb-Teensyduino_USB_Serial_8829000-if00` |
 
 macOS/Linux example:
@@ -294,6 +296,15 @@ If a new PC cannot run the API against hardware, check in this order:
 
    ```bash
    ssh ubuntu-24-04@100.98.132.51 'ss -ltnp | grep 10430 || true'
+   ```
+
+   If the capture log shows `Connection refused`, `failed to connect to all addresses`,
+   or `DeviceSetupFailure`, the API treats Logic 2 automation as crashed or wedged and
+   runs the Saleae restart script before the next capture retry. The default restart
+   command is:
+
+   ```bash
+   ssh ubuntu-24-04@100.98.132.51 'cd /home/ubuntu-24-04/saleae-api && ./start-logic2-automation.sh'
    ```
 
 5. Is the DAC/ADC Teensy visible on Ubuntu?

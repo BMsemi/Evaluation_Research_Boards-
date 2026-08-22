@@ -133,10 +133,22 @@ Use this when the user has a fresh remote PC and does not know the lab network s
 
    Recommended: configure SSH keys. Password mode is less reliable for automation, especially on Windows.
 
-   On Ubuntu/macOS, password automation for the Zynq host can be used with:
+   On Ubuntu/macOS, password automation for the Zynq host can be used with a command-line flag:
 
    ```bash
    --zynq-password <zynq-password>
+   ```
+
+   Or set the password in your shell for the current terminal session:
+
+   ```bash
+   export SCAN_DEBUG_ZYNQ_PASSWORD='<zynq-password>'
+   ```
+
+   After that, hardware commands can omit `--zynq-password`:
+
+   ```bash
+   python api_v1/scan_debug_cli.py read --row 1 --col 0
    ```
 
    On Windows, use SSH keys instead of `--zynq-password`.
@@ -187,6 +199,39 @@ Use this when the user has a fresh remote PC and does not know the lab network s
    ```bash
    python api_v1/scan_debug_cli.py read --row 1 --col 0
    ```
+
+## Authentication and Local Configuration
+
+Do not commit passwords or private keys to this repository. Use SSH keys when possible, or set credentials as environment variables on the API runner PC.
+
+The CLI reads these environment variables when matching command-line flags are not provided:
+
+| Environment variable | Matching flag | Default |
+|---|---|---|
+| `SCAN_DEBUG_ZYNQ_HOST` | `--zynq-host` | `geethika@100.116.216.70` |
+| `SCAN_DEBUG_ZYNQ_PASSWORD` | `--zynq-password` | empty |
+| `SCAN_DEBUG_ZYNQ_OS` | `--zynq-os` | `windows` |
+| `SCAN_DEBUG_ZYNQ_DIR` | `--zynq-dir` | `C:/Users/geethika/zynq_scan_debug` |
+| `SCAN_DEBUG_VIVADO_CMD` | `--vivado-cmd` | `C:/Xilinx/Vivado/2019.1/bin/vivado.bat` |
+| `SCAN_DEBUG_SALEAE_HOST` | `--saleae-host` | `ubuntu-24-04@100.98.132.51` |
+| `SCAN_DEBUG_SALEAE_DIR` | `--saleae-dir` | `/home/ubuntu-24-04/saleae-api` |
+| `SCAN_DEBUG_ADC_DAC_PORT` | `--adc-dac-port` | `/dev/serial/by-id/usb-Teensyduino_USB_Serial_8829000-if00` |
+
+macOS/Linux example:
+
+```bash
+export SCAN_DEBUG_ZYNQ_PASSWORD='<zynq-password>'
+python api_v1/scan_debug_cli.py read --row 1 --col 0
+```
+
+Windows PowerShell example:
+
+```powershell
+$env:SCAN_DEBUG_ZYNQ_PASSWORD = '<zynq-password>'
+python api_v1/scan_debug_cli.py read --row 1 --col 0
+```
+
+For persistent local settings, store these exports in a local shell profile or an untracked `.env` file. The repository ignores `.env`, `.env.*`, and generated `api_v1/runs/` captures.
 
 ## Network Troubleshooting
 

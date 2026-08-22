@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import time
 from pathlib import Path
 
@@ -78,14 +79,17 @@ def main() -> int:
     parser.add_argument("--set-threshold", type=float, default=150.0)
     parser.add_argument("--reset-threshold", type=float, default=100.0)
 
-    parser.add_argument("--zynq-host", default="geethika@100.116.216.70")
-    parser.add_argument("--zynq-password", default="")
-    parser.add_argument("--zynq-os", choices=["windows", "posix"], default="windows")
-    parser.add_argument("--zynq-dir", default="C:/Users/geethika/zynq_scan_debug")
-    parser.add_argument("--vivado-cmd", default="C:/Xilinx/Vivado/2019.1/bin/vivado.bat")
-    parser.add_argument("--saleae-host", default="ubuntu-24-04@100.98.132.51")
-    parser.add_argument("--saleae-dir", default="/home/ubuntu-24-04/saleae-api")
-    parser.add_argument("--adc-dac-port", default="/dev/serial/by-id/usb-Teensyduino_USB_Serial_8829000-if00")
+    parser.add_argument("--zynq-host", default=os.environ.get("SCAN_DEBUG_ZYNQ_HOST", "geethika@100.116.216.70"))
+    parser.add_argument("--zynq-password", default=os.environ.get("SCAN_DEBUG_ZYNQ_PASSWORD", ""))
+    parser.add_argument("--zynq-os", choices=["windows", "posix"], default=os.environ.get("SCAN_DEBUG_ZYNQ_OS", "windows"))
+    parser.add_argument("--zynq-dir", default=os.environ.get("SCAN_DEBUG_ZYNQ_DIR", "C:/Users/geethika/zynq_scan_debug"))
+    parser.add_argument("--vivado-cmd", default=os.environ.get("SCAN_DEBUG_VIVADO_CMD", "C:/Xilinx/Vivado/2019.1/bin/vivado.bat"))
+    parser.add_argument("--saleae-host", default=os.environ.get("SCAN_DEBUG_SALEAE_HOST", "ubuntu-24-04@100.98.132.51"))
+    parser.add_argument("--saleae-dir", default=os.environ.get("SCAN_DEBUG_SALEAE_DIR", "/home/ubuntu-24-04/saleae-api"))
+    parser.add_argument(
+        "--adc-dac-port",
+        default=os.environ.get("SCAN_DEBUG_ADC_DAC_PORT", "/dev/serial/by-id/usb-Teensyduino_USB_Serial_8829000-if00"),
+    )
     args = parser.parse_args()
 
     api = ScanDebugCellAPI(build_config(args))

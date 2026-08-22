@@ -29,5 +29,5 @@ Flash `teensy_dac_adc/DAC_analog_vltgs.ino` to the DAC/ADC Teensy with the other
 - Read verify rails: `Vcc_set=1.2 V`, `Vcc_wl_set=2.5 V`.
 - Set ramp default: `Vcc_set=2.0,2.3,2.4,2.5,2.8 V`; `Vcc_wl_set=0.5..2.0 V`.
 - Reset ramp default: `Vcc_set=2.0,2.3,2.6,2.9,3.2,3.5 V`; `Vcc_wl_set=0.5..2.0 V`.
-- Shunt: `1 kOhm`, override with `--shunt-ohms`.
+- Shunt: `470 ohms`, override with `--shunt-ohms`.
 - `SCAN_CUSTOM_RAILS` drives only `Vcc_set` and `Vcc_wl_set`; read/reset rails are held at `0 V` by the included firmware for this scan-debug API flow.

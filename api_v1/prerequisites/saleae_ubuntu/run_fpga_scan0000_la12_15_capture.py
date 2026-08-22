@@ -63,7 +63,7 @@ SCAN_REQUEST = os.environ.get("SCAN_REQUEST", "0x0000").strip()
 SCAN_RAIL_COMMAND = os.environ.get("SCAN_RAIL_COMMAND", "SCAN_SET_RAILS").strip()
 SCAN_REQUEST_TAG = SCAN_REQUEST.lower().replace("0x", "")
 
-SHUNT_OHMS = float(os.environ.get("SHUNT_OHMS", "1000.0"))
+SHUNT_OHMS = float(os.environ.get("SHUNT_OHMS", "470.0"))
 
 RAILS_REQUESTED = {
     "Vcc_read_V": 0.0,

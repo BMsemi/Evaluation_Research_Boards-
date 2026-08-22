@@ -13,7 +13,7 @@ The API keeps the experiment behavior used in the recent stair-pulse runs:
 - read verification uses `Vcc_set=1.2 V`, `Vcc_wl_set=2.5 V` by default;
 - set uses `OP_SET=1` and ramps rails until read current crosses the set threshold;
 - reset/read polarity uses `OP_SET=0` and ramps rails until read current crosses the reset threshold;
-- Saleae A12-A13 is treated as the set shunt current through `shunt_ohms`, default `1 kOhm`.
+- Saleae A12-A13 is treated as the set shunt current through `shunt_ohms`, default `470 ohms`.
 
 ## Where This API Runs
 
@@ -434,8 +434,8 @@ Current probes:
 
 | Measurement | Saleae analog channels | Shunt |
 |---|---:|---:|
-| Set shunt current | A12 - A13 | default `1 kOhm` |
-| Reset shunt current | A14 - A15 | default `1 kOhm` |
+| Set shunt current | A12 - A13 | default `470 ohms` |
+| Reset shunt current | A14 - A15 | default `470 ohms` |
 | ADC set monitor | A0 - A1 | firmware monitor |
 | ADC read monitor | A2 - A3 | firmware monitor |
 | ADC reset monitor | A4 - A5 | firmware monitor |

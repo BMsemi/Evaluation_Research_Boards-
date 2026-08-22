@@ -50,7 +50,7 @@ static const uint8_t ADS1258_MONITOR_MASK =
   (1 << ADS1258_DIFF_INDEX_SET) |
   (1 << ADS1258_DIFF_INDEX_RESET);
 static const float ADS1258_VREF_VOLTS = 5.000f; // VREFP-VREFN. Match the current ADS1258 AVDD-AVSS/reference setup.
-static const float ADS1258_SHUNT_GAIN = 2.6031f; // Calibrated against Saleae LA10-LA9 on GPIO27 1 kOhm shunt.
+static const float ADS1258_SHUNT_GAIN = 2.6031f; // Calibrated against Saleae LA10-LA9 on GPIO27 470 ohm shunt.
 static const unsigned long ADS1258_SAMPLE_TIMEOUT_US = 3000;
 static const int MONITOR_DEFAULT_SET_MV = 500;
 static const int MONITOR_DEFAULT_RESET_MV = 500;
@@ -76,7 +76,7 @@ float reset_vi = 0.1, reset_vlim = 3.5, reset_vstep = 0.01; // Initial voltage, 
 float setv = -3.5, resetv = 4.5; // I dunno what it is...
 float setECC_v = 0, resetECC_v = 2.56; // The set & reset ECC voltage pulse amplitude ( ECC --> Error Correcting Code )
 float read_v = 1.7; // Vcc_read(min =1.3, max = 1.7)
-float reRAM_res = 0, shunt_res = 1000; // Measured resistance of the ReRAM during the last read cycle & Shunt Resistor Ohm
+float reRAM_res = 0, shunt_res = 470; // Measured resistance of the ReRAM during the last read cycle & Shunt Resistor Ohm
 float currentSense_gain = 1.0; // Transimpedance Amp V/mA
 //float marginHRSL = 0.05, marginHRSH = 0.05; // HRS Low & High limits for a bounded condition checking.
 //float marginLRSL = 0.05, marginLRSH = 0.05; // LRS Low & High limits for a bounded condition checking.

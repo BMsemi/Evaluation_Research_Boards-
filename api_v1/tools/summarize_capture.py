@@ -9,7 +9,7 @@ import statistics
 from pathlib import Path
 
 
-SHUNT_OHMS = 1000.0
+SHUNT_OHMS = 470.0
 
 
 def transitions_from_csv(path: Path, channel: int):

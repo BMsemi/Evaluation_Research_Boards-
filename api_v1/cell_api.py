@@ -124,7 +124,7 @@ class ScanDebugConfig:
         )
     )
     attempts: int = 3
-    shunt_ohms: float = 1000.0
+    shunt_ohms: float = 470.0
     dry_run: bool = False
 
     zynq_host: str | None = "geethika@100.116.216.70"

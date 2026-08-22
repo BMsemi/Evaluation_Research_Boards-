@@ -68,7 +68,7 @@ def main() -> int:
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--attempts", type=int, default=3)
     parser.add_argument("--confirm-reads", type=int, default=10)
-    parser.add_argument("--shunt-ohms", type=float, default=1000.0)
+    parser.add_argument("--shunt-ohms", type=float, default=470.0)
 
     parser.add_argument("--read-vcc-set", type=float, default=1.2)
     parser.add_argument("--read-vcc-wl-set", type=float, default=2.5)

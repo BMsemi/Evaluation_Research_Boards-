@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Scan-Debug Cell Monitor</title>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <main class="app">
+      <header class="topbar">
+        <div>
+          <h1>Scan Monitor</h1>
+          <p id="subtitle">--</p>
+        </div>
+        <div class="top-actions">
+          <select id="runSelect" aria-label="Run"></select>
+          <button id="refreshBtn" class="icon-btn" type="button" title="Refresh now">R</button>
+        </div>
+      </header>
+
+      <section class="metrics" aria-label="Current run summary">
+        <div class="metric">
+          <span>Read</span>
+          <strong id="lastCell">--</strong>
+        </div>
+        <div class="metric">
+          <span>uA</span>
+          <strong id="lastCurrent">--</strong>
+        </div>
+      </section>
+
+      <section class="workspace">
+        <div class="panel heatmap-panel">
+          <div class="panel-head">
+            <div>
+              <h2>1Kbit</h2>
+            </div>
+            <div id="scale" class="scale">--</div>
+          </div>
+          <div id="heatmap" class="heatmap" aria-label="1Kbit cell heatmap"></div>
+        </div>
+
+        <aside class="panel side-panel">
+          <h2>Live</h2>
+          <div id="activeCell" class="active-cell">--</div>
+          <div class="status-strip" aria-label="Operation status">
+            <span id="opDot" class="dot"></span>
+            <strong id="opCompact">--</strong>
+            <span id="packetCompact">--</span>
+          </div>
+
+          <form id="commandForm" class="command-form">
+            <h2>Control</h2>
+            <label>Op
+              <select id="operationInput">
+                <option value="read">Read</option>
+                <option value="set">Set</option>
+                <option value="reset">Reset</option>
+                <option value="cycle">Cycle</option>
+              </select>
+            </label>
+            <label>Row <input id="rowInput" type="number" min="0" max="31" value="0"></label>
+            <label>Col <input id="colInput" type="number" min="0" max="31" value="0"></label>
+            <label class="checkbox"><input id="dryRunInput" type="checkbox" checked> Dry run</label>
+            <button id="commandBtn" type="submit">Start</button>
+            <p id="commandNote">Start server with --allow-commands to enable.</p>
+          </form>
+
+          <div class="api-return" aria-label="Live API output">
+            <div class="return-head">
+              <span id="apiSignal" class="signal"></span>
+              <strong>API return</strong>
+            </div>
+            <div id="tickerText" class="ticker-stack">
+              <div class="ticker-line">Waiting for API...</div>
+              <div class="ticker-line muted-line">--</div>
+            </div>
+          </div>
+        </aside>
+      </section>
+
+      <section class="panel data-panel">
+        <div class="panel-head">
+          <div>
+            <h2>Read Trace</h2>
+          </div>
+        </div>
+        <canvas id="chart" width="1200" height="220" aria-label="Current trend chart"></canvas>
+      </section>
+    </main>
+    <script src="/app.js"></script>
+  </body>
+</html>

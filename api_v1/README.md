@@ -15,6 +15,38 @@ The API keeps the experiment behavior used in the recent stair-pulse runs:
 - reset/read polarity uses `OP_SET=0` and ramps rails until read current crosses the reset threshold;
 - Saleae A12-A13 is treated as the set shunt current through `shunt_ohms`, default `470 ohms`.
 
+## Realtime GUI
+
+The repo includes a local browser GUI for watching scan-debug runs in realtime. It reads the same `api_v1/runs/*/manifest.csv` files that the API writes, so it can be started while another API command is already running in the background.
+
+Start the GUI from the repo root:
+
+```bash
+python api_v1/gui/server.py
+```
+
+Then open:
+
+```text
+http://127.0.0.1:8765
+```
+
+Use the GUI to see:
+
+- the latest API manifest rows as they are recorded;
+- a 32 by 32 1Kbit heatmap of the most recent read-packet current value for each cell;
+- the last recorded read-packet current and selected cell;
+- a blinking marker on the cell currently being read or programmed;
+- rising/falling current trends from read packets as records arrive.
+
+By default the GUI is view-only and does not start hardware actions. To also control API commands from the browser, start it with command controls enabled:
+
+```bash
+python api_v1/gui/server.py --allow-commands
+```
+
+In command-control mode, the GUI can launch `read`, `set`, `reset`, and `cycle` commands through `api_v1/scan_debug_cli.py`. Existing background API processes are not stopped by the GUI; new commands should only be started when the bench is ready for another operation.
+
 ## Where This API Runs
 
 The API can run on any macOS, Ubuntu, or Windows PC, but only if that PC can reach the lab hardware control computers over the network.

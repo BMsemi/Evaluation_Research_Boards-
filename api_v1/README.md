@@ -10,7 +10,7 @@ The API keeps the experiment behavior used in the recent stair-pulse runs:
 
 - every packet programs the FPGA bitstream for the selected cell and mode;
 - FPGA asserts Caravel reset before sending the packet;
-- read verification uses `Vcc_set=1.2 V`, `Vcc_wl_set=2.5 V` by default;
+- read verification uses `Vcc_set=1.0 V`, `Vcc_wl_set=2.5 V` by default;
 - set uses `OP_SET=1` and ramps rails until read current crosses the set threshold;
 - reset/read polarity uses `OP_SET=0` and ramps rails until read current crosses the reset threshold;
 - Saleae A12-A13 is treated as the set shunt current through `shunt_ohms`, default `470 ohms`.
@@ -356,13 +356,25 @@ python api_v1/scan_debug_cli.py reset --row 5 --col 0 \
   --reset-threshold 130
 ```
 
-Fast full 32 by 32 array read:
+Default 32 by 32 array read:
 
 ```bash
 python api_v1/scan_debug_cli.py read-array
 ```
 
-This uses burst mode by default. The API programs one FPGA sequence bitstream, starts one Saleae-side burst helper, and records all 1024 read packets into the normal `manifest.csv` for the GUI heatmap.
+This uses column-by-column burst mode by default. The API reads column 0 through column 31 as separate burst chunks, appends each decoded column into the normal `manifest.csv`, and the GUI heatmap updates after each column.
+
+One-shot full-array burst is still available from the CLI:
+
+```bash
+python api_v1/scan_debug_cli.py read-array --array-mode burst
+```
+
+Prebuild and cache all column-burst FPGA bitstreams into the tracked bitstream folder:
+
+```bash
+python api_v1/scan_debug_cli.py build-array-bitstreams
+```
 
 Old per-cell behavior is still available:
 
@@ -370,7 +382,7 @@ Old per-cell behavior is still available:
 python api_v1/scan_debug_cli.py read-array --array-mode serial
 ```
 
-Burst mode currently supports the full 32 by 32 array. Use serial mode for sub-ranges.
+Full burst mode supports the full 32 by 32 array and publishes after final decode. Serial mode publishes after each individual cell read.
 
 ## Cross-Platform Notes
 

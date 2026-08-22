@@ -26,7 +26,7 @@ Flash `teensy_dac_adc/DAC_analog_vltgs.ino` to the DAC/ADC Teensy with the other
 
 ## Important Defaults
 
-- Read verify rails: `Vcc_set=1.2 V`, `Vcc_wl_set=2.5 V`.
+- Read verify rails: `Vcc_set=1.0 V`, `Vcc_wl_set=2.5 V`.
 - Set ramp default: `Vcc_set=1.6,2.0,2.3,2.4,2.5,2.8 V`; `Vcc_wl_set=0.5,0.7,0.9,1.1,1.3,1.5,1.7,1.9,2.0 V`.
 - Reset ramp default: `Vcc_set=2.0,2.3,2.6,2.9,3.2,3.5 V`; `Vcc_wl_set=0.5,0.8,1.1,1.4,1.7,2.0,2.5 V`.
 - Shunt: `470 ohms`, override with `--shunt-ohms`.

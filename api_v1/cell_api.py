@@ -7,6 +7,7 @@ import json
 import math
 import os
 import platform
+import re
 import shutil
 import statistics
 import subprocess
@@ -19,6 +20,7 @@ from typing import Iterable, Literal
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_SUMMARIZER = ROOT / "api_v1/tools/summarize_capture.py"
+FPGA_BITSTREAM_DIR = ROOT / "api_v1/prerequisites/fpga_zynq7020/bitstreams"
 MANIFEST_FIELDS = [
     "index",
     "stage",
@@ -106,7 +108,7 @@ class SweepConfig:
 @dataclass
 class ScanDebugConfig:
     run_dir: Path = ROOT / "api_v1/runs/default"
-    read_rails: RailVoltages = field(default_factory=lambda: RailVoltages(1.2, 2.5))
+    read_rails: RailVoltages = field(default_factory=lambda: RailVoltages(1.0, 2.5))
     set_sweep: SweepConfig = field(
         default_factory=lambda: SweepConfig.from_ranges(
             vcc_set_v=(1.6, 2.0, 2.3, 2.4, 2.5, 2.8),
@@ -264,7 +266,7 @@ class ScanDebugCellAPI:
         col_start: int = 0,
         col_end: int = 31,
         *,
-        mode: Literal["burst", "serial"] = "burst",
+        mode: Literal["burst", "burst-columns", "serial"] = "burst-columns",
     ) -> dict[str, object]:
         if not 0 <= row_start <= row_end <= 31:
             raise ValueError(f"row range must be 0..31, got {row_start}..{row_end}")
@@ -272,8 +274,10 @@ class ScanDebugCellAPI:
             raise ValueError(f"col range must be 0..31, got {col_start}..{col_end}")
         if mode == "burst":
             return self.read_array_burst(row_start, row_end, col_start, col_end)
+        if mode == "burst-columns":
+            return self.read_array_burst_columns(row_start, row_end, col_start, col_end)
         if mode != "serial":
-            raise ValueError(f"array mode must be burst or serial, got {mode!r}")
+            raise ValueError(f"array mode must be burst, burst-columns, or serial, got {mode!r}")
         reads: list[dict[str, object]] = []
         for row in range(row_start, row_end + 1):
             for col in range(col_start, col_end + 1):
@@ -290,6 +294,69 @@ class ScanDebugCellAPI:
         self._append_jsonl("array_reads.jsonl", summary)
         return summary
 
+    def read_array_burst_columns(
+        self,
+        row_start: int = 0,
+        row_end: int = 31,
+        col_start: int = 0,
+        col_end: int = 31,
+    ) -> dict[str, object]:
+        total = (row_end - row_start + 1) * (col_end - col_start + 1)
+        all_reads: list[dict[str, object]] = []
+        self._ensure_saleae_burst_script()
+        for col in range(col_start, col_end + 1):
+            column_total = row_end - row_start + 1
+            packet = packet_for_cell(CellAddress(row_start, col), 0)
+            self._append_progress("read-array", f"Column {col}: preparing burst", cells=len(all_reads), total=total)
+            bitstream = self._ensure_array_bitstream(row_start, col)
+            if self.config.dry_run:
+                for row in range(row_start, row_end + 1):
+                    all_reads.append(
+                        {
+                            "cell": asdict(CellAddress(row, col)),
+                            "operation": "read",
+                            "packet": f"0x{packet_for_cell(CellAddress(row, col), 0):04x}",
+                            "rails": asdict(self.config.read_rails),
+                            "current_uA": None,
+                            "decoded_packet": "",
+                            "ok": True,
+                            "dry_run": True,
+                        }
+                    )
+                self._append_progress("read-array", f"Column {col}: dry-run complete", cells=len(all_reads), total=total)
+                continue
+            index = self._next_index()
+            self._append_progress("read-array", f"Column {col}: starting Saleae burst", cells=len(all_reads), total=total)
+            remote_output_dir = self._capture_array_burst(
+                packet,
+                self.config.read_rails,
+                bitstream,
+                index,
+                column_total,
+                row_start,
+                col,
+                f"column {col}",
+            )
+            self._append_progress("read-array", f"Column {col}: copying capture", cells=len(all_reads), total=total)
+            local_output_dir = self._copy_capture(remote_output_dir, index, f"read_array_col{col:02d}_burst", self.config.read_rails)
+            self._append_progress("read-array", f"Column {col}: decoding reads", cells=len(all_reads), total=total)
+            reads = self._append_burst_manifest(local_output_dir, remote_output_dir, bitstream)
+            all_reads.extend(reads)
+            self._append_progress("read-array", f"Column {col}: decoded", cells=len(all_reads), total=total)
+        summary = {
+            "operation": "read-array",
+            "mode": "burst-columns",
+            "row_start": row_start,
+            "row_end": row_end,
+            "col_start": col_start,
+            "col_end": col_end,
+            "count": len(all_reads),
+            "rails": asdict(self.config.read_rails),
+            "reads": all_reads,
+        }
+        self._append_jsonl("array_reads.jsonl", summary)
+        return summary
+
     def read_array_burst(
         self,
         row_start: int = 0,
@@ -301,6 +368,7 @@ class ScanDebugCellAPI:
             raise ValueError("burst array read currently supports the full 32x32 array only; use mode='serial' for sub-ranges")
         cells = self._array_sweep_cells(row_start, col_start)
         packet = packet_for_cell(CellAddress(row_start, col_start), 0)
+        self._append_progress("read-array", "Preparing burst bitstream", cells=0, total=len(cells))
         bitstream = self._ensure_array_bitstream(row_start, col_start)
         if self.config.dry_run:
             summary = {
@@ -321,9 +389,13 @@ class ScanDebugCellAPI:
 
         self._ensure_saleae_burst_script()
         index = self._next_index()
-        remote_output_dir = self._capture_array_burst(packet, self.config.read_rails, bitstream, index, len(cells), row_start, col_start)
+        self._append_progress("read-array", "Starting Saleae burst capture", mode="burst")
+        remote_output_dir = self._capture_array_burst(packet, self.config.read_rails, bitstream, index, len(cells), row_start, col_start, "full-array burst")
+        self._append_progress("read-array", "Copying burst capture", mode="burst")
         local_output_dir = self._copy_capture(remote_output_dir, index, "read_array_burst", self.config.read_rails)
+        self._append_progress("read-array", "Decoding burst reads", mode="burst")
         reads = self._append_burst_manifest(local_output_dir, remote_output_dir, bitstream)
+        self._append_progress("read-array", "Burst read decoded", cells=len(reads), total=len(cells))
         summary = {
             "operation": "read-array",
             "mode": "burst",
@@ -567,6 +639,10 @@ exit
             return bit_name
         if self._remote_file_exists(bit_name):
             return bit_name
+        cached = self._cached_array_bitstream(row_start, col_start)
+        if cached.exists():
+            self._write_remote_binary(bit_name, cached.read_bytes())
+            return bit_name
         tcl_name = f"build_scan_debug_array_read_r{row_start:02d}c{col_start:02d}_burst.tcl"
         tcl = self._build_array_tcl(row_start, col_start, bit_name)
         self._write_remote_text(tcl_name, tcl)
@@ -574,6 +650,49 @@ exit
         if proc.returncode != 0:
             raise RuntimeError(proc.stdout)
         return bit_name
+
+    def prebuild_array_column_bitstreams(
+        self,
+        row_start: int = 0,
+        col_start: int = 0,
+        col_end: int = 31,
+        *,
+        force: bool = False,
+    ) -> dict[str, object]:
+        if not 0 <= row_start <= 31:
+            raise ValueError(f"row_start must be 0..31, got {row_start}")
+        if not 0 <= col_start <= col_end <= 31:
+            raise ValueError(f"col range must be 0..31, got {col_start}..{col_end}")
+        FPGA_BITSTREAM_DIR.mkdir(parents=True, exist_ok=True)
+        built: list[str] = []
+        cached: list[str] = []
+        for col in range(col_start, col_end + 1):
+            local_path = self._cached_array_bitstream(row_start, col)
+            if local_path.exists() and not force:
+                cached.append(local_path.name)
+                continue
+            bit_name = f"caravel_scan_debug_fpga_array_read_r{row_start:02d}c{col:02d}_burst.bit"
+            if self.config.dry_run:
+                built.append(bit_name)
+                continue
+            if force and self._remote_file_exists(bit_name):
+                self._remove_remote_file(bit_name)
+            self._ensure_array_bitstream(row_start, col)
+            self._copy_remote_binary_to_local(bit_name, local_path)
+            built.append(local_path.name)
+        return {
+            "operation": "build-array-bitstreams",
+            "row_start": row_start,
+            "col_start": col_start,
+            "col_end": col_end,
+            "built": built,
+            "cached": cached,
+            "bitstream_dir": str(FPGA_BITSTREAM_DIR.relative_to(ROOT)),
+        }
+
+    @staticmethod
+    def _cached_array_bitstream(row_start: int, col_start: int) -> Path:
+        return FPGA_BITSTREAM_DIR / f"caravel_scan_debug_fpga_array_read_r{row_start:02d}c{col_start:02d}_burst.bit"
 
     @staticmethod
     def _array_sweep_cells(row_start: int = 0, col_start: int = 0) -> list[CellAddress]:
@@ -660,6 +779,7 @@ exit
         max_cells: int,
         row_start: int,
         col_start: int,
+        burst_label: str = "burst read",
     ) -> str:
         env = {
             "ADC_DAC_PORT": self.config.adc_dac_port,
@@ -683,7 +803,9 @@ exit
         capture_log = self.config.run_dir / f"capture_{index}_read_array_burst.log"
         capture_proc = self._popen_saleae(capture_cmd)
         time.sleep(2.0)
+        self._append_progress("read-array", f"Programming FPGA for {burst_label}", mode="burst")
         program_rc = self._program_fpga(bitstream)
+        self._append_progress("read-array", f"Saleae capturing {burst_label}", mode="burst")
         output, _ = capture_proc.communicate()
         capture_log.write_text(output or "")
         remote_output_dir = ""
@@ -737,6 +859,8 @@ exit
                         "error": result.error,
                     }
                 )
+                if (offset + 1) % 64 == 0:
+                    self._append_progress("read-array", "Publishing burst reads", cells=offset + 1)
         return reads
 
     def _capture_remote(self, packet: int, rails: RailVoltages, bitstream: str, index: int, kind: str) -> str:
@@ -940,6 +1064,16 @@ exit
         with (self.config.run_dir / filename).open("a") as handle:
             handle.write(json.dumps(item, sort_keys=True) + "\n")
 
+    def _append_progress(self, operation: str, message: str, **extra: object) -> None:
+        item = {
+            "operation": operation,
+            "message": message,
+            "time": time.time(),
+            **extra,
+        }
+        self._append_jsonl("progress.jsonl", item)
+        print(json.dumps({"progress": item}, sort_keys=True), flush=True)
+
     def _remote_file_exists(self, filename: str) -> bool:
         if self.config.zynq_os == "windows":
             proc = self._run_zynq_powershell(f"if (Test-Path '{filename}') {{ exit 0 }} else {{ exit 1 }}", timeout_s=60)
@@ -965,6 +1099,55 @@ exit
             )
         if proc.returncode != 0:
             raise RuntimeError(proc.stdout)
+
+    def _write_remote_binary(self, filename: str, data: bytes) -> None:
+        encoded = base64.b64encode(data).decode()
+        if self.config.zynq_os == "windows":
+            cmd = f"$b='{encoded}'; [IO.File]::WriteAllBytes('{filename}', [Convert]::FromBase64String($b))"
+            proc = self._run_zynq_powershell(cmd, timeout_s=180)
+        else:
+            proc = self._run_zynq(
+                f"python3 - <<'PY'\n"
+                f"import base64, pathlib\n"
+                f"pathlib.Path({filename!r}).write_bytes(base64.b64decode({encoded!r}))\n"
+                f"PY",
+                timeout_s=180,
+            )
+        if proc.returncode != 0:
+            raise RuntimeError(proc.stdout)
+
+    def _copy_remote_binary_to_local(self, filename: str, local_path: Path) -> None:
+        local_path.parent.mkdir(parents=True, exist_ok=True)
+        if not self.config.zynq_host:
+            source = Path(self.config.zynq_dir) / filename
+            shutil.copy2(source, local_path)
+            return
+        if self.config.zynq_os == "windows":
+            proc = self._run_zynq_powershell(
+                f"Write-Output '__BITSTREAM_B64_BEGIN__'; "
+                f"[Convert]::ToBase64String([IO.File]::ReadAllBytes('{filename}')); "
+                f"Write-Output '__BITSTREAM_B64_END__'",
+                timeout_s=180,
+            )
+        else:
+            proc = self._run_zynq(
+                f"echo __BITSTREAM_B64_BEGIN__; base64 {self._sh_quote(filename)}; echo __BITSTREAM_B64_END__",
+                timeout_s=180,
+            )
+        if proc.returncode != 0:
+            raise RuntimeError(proc.stdout)
+        match = re.search(r"__BITSTREAM_B64_BEGIN__\s*(.*?)\s*__BITSTREAM_B64_END__", proc.stdout, re.S)
+        if not match:
+            raise RuntimeError(f"could not find bitstream payload in remote output for {filename}")
+        payload = re.sub(r"[^A-Za-z0-9+/=]", "", match.group(1))
+        payload += "=" * (-len(payload) % 4)
+        local_path.write_bytes(base64.b64decode(payload))
+
+    def _remove_remote_file(self, filename: str) -> None:
+        if self.config.zynq_os == "windows":
+            self._run_zynq_powershell(f"if (Test-Path '{filename}') {{ Remove-Item -Force '{filename}' }}", timeout_s=60)
+        else:
+            self._run_zynq(f"rm -f {self._sh_quote(filename)}", timeout_s=60)
 
     def _run_zynq_powershell(self, command: str, timeout_s: int | None = None) -> subprocess.CompletedProcess[str]:
         encoded = base64.b64encode(command.encode("utf-16le")).decode()

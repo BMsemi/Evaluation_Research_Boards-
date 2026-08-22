@@ -8,8 +8,6 @@ const state = {
 const els = {
   runSelect: document.getElementById("runSelect"),
   followBtn: document.getElementById("followBtn"),
-  refreshBtn: document.getElementById("refreshBtn"),
-  subtitle: document.getElementById("subtitle"),
   apiSignal: document.getElementById("apiSignal"),
   tickerText: document.getElementById("tickerText"),
   lastCell: document.getElementById("lastCell"),
@@ -100,7 +98,6 @@ function renderMetrics(summary) {
   const last = summary?.last;
   const activeCell = summary?.lastCell;
   const lastReadCell = summary?.lastReadCell;
-  els.subtitle.textContent = summary ? summary.run.id : "No runs";
   els.lastCell.textContent = formatCell(lastReadCell);
   els.lastCurrent.textContent = formatCurrent(summary?.lastCurrent_uA);
 
@@ -116,7 +113,8 @@ function renderMetrics(summary) {
 function renderTicker(summary) {
   const history = summary?.history || [];
   const logEvents = summary?.logEvents || [];
-  const rows = [...history, ...logEvents]
+  const progressEvents = summary?.progressEvents || [];
+  const rows = [...history, ...logEvents, ...progressEvents]
     .sort((a, b) => eventOrder(a) - eventOrder(b))
     .slice(-2)
     .reverse()
@@ -142,7 +140,16 @@ function eventOrder(row) {
 
 function formatApiEvent(row) {
   if (row.source === "log") {
-    return `ERROR: ${row.message}`;
+    return `ERROR: ${formatApiMessage(row.message)}`;
+  }
+  if (row.source === "progress") {
+    const hasCount = Number.isFinite(row.cells) && row.cells > 0;
+    const count = hasCount && Number.isFinite(row.total)
+      ? ` (${row.cells}/${row.total})`
+      : hasCount
+        ? ` (${row.cells})`
+        : "";
+    return `${String(row.operation || "API").toUpperCase()}: ${formatApiMessage(row.message)}${count}`;
   }
   const cell = formatCell(row.cellAddress);
   const packet = row.packet ? `packet ${row.packet}` : "packet unknown";
@@ -154,6 +161,10 @@ function formatApiEvent(row) {
     return `Read ${cell}: ${formatCurrent(row.current_uA)} uA, ${packet}, ${status}`;
   }
   return `${String(row.operation || "Program").toUpperCase()} pulse at ${cell}: ${rails}, ${packet}, ${status}`;
+}
+
+function formatApiMessage(message) {
+  return String(message || "").replace(/\bFPGA\s+/gi, "");
 }
 
 function renderHeatmap(summary) {
@@ -170,8 +181,8 @@ function renderHeatmap(summary) {
     node.classList.toggle("active", node.dataset.key === activeKey);
     node.title = item ? `${formatCell(item.cellAddress)} ${formatCurrent(value)} uA ${item.operation}` : `${node.dataset.key}: no read`;
   }
-  els.scaleMin.textContent = `HRS ${min.toFixed(0)}`;
-  els.scaleMax.textContent = `LRS ${max.toFixed(0)}uA`;
+  els.scaleMin.textContent = "High Resistance(HRS)";
+  els.scaleMax.textContent = "Low Resistance(LRS)";
 }
 
 function renderChart(summary) {
@@ -486,7 +497,6 @@ els.followBtn.addEventListener("click", () => {
   renderFollowMode();
   refresh();
 });
-els.refreshBtn.addEventListener("click", refresh);
 els.killBtn.addEventListener("click", async () => {
   if (!state.runningCommandId) return;
   const external = state.runningCommandId.startsWith("pid-");

@@ -100,7 +100,7 @@ def _manifest_for_run(run_dir: Path) -> Path:
 
 
 def _run_updated_at(run_dir: Path) -> float:
-    files = [path for path in run_dir.glob("manifest.csv")] + list(run_dir.glob("*.log"))
+    files = [path for path in run_dir.glob("manifest.csv")] + list(run_dir.glob("*.log")) + list(run_dir.glob("progress.jsonl"))
     if not files:
         return run_dir.stat().st_mtime
     return max(path.stat().st_mtime for path in files)
@@ -130,6 +130,35 @@ def _recent_log_events(run_dir: Path) -> list[dict[str, Any]]:
                 "path": str(log_path.relative_to(ROOT)),
                 "updated": log_path.stat().st_mtime,
                 "eventOrder": _log_event_order(log_path),
+            }
+        )
+    return events[-4:]
+
+
+def _read_progress_events(run_dir: Path) -> list[dict[str, Any]]:
+    progress_path = run_dir / "progress.jsonl"
+    events: list[dict[str, Any]] = []
+    try:
+        lines = progress_path.read_text(errors="replace").splitlines()
+    except OSError:
+        return events
+    for index, line in enumerate(lines[-12:]):
+        try:
+            item = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        event_time = _float_or_none(item.get("time"))
+        events.append(
+            {
+                "source": "progress",
+                "index": f"progress_{index}",
+                "operation": item.get("operation", "read-array"),
+                "message": item.get("message", "Processing"),
+                "cells": _int_or_none(item.get("cells")),
+                "total": _int_or_none(item.get("total")),
+                "ok": True,
+                "updated": event_time or progress_path.stat().st_mtime,
+                "eventOrder": (event_time or progress_path.stat().st_mtime) * 1000,
             }
         )
     return events[-4:]
@@ -250,6 +279,7 @@ def _is_read_row(row: dict[str, Any]) -> bool:
 
 def _summarize(run_dir: Path, rows: list[dict[str, Any]]) -> dict[str, Any]:
     log_events = _recent_log_events(run_dir)
+    progress_events = _read_progress_events(run_dir)
     active_error = _active_error(run_dir, rows, log_events)
     thresholds = _read_thresholds(run_dir)
     latest_read_by_cell: dict[str, dict[str, Any]] = {}
@@ -318,6 +348,7 @@ def _summarize(run_dir: Path, rows: list[dict[str, Any]]) -> dict[str, Any]:
         "history": rows[-160:],
         "readHistory": reads[-160:],
         "logEvents": log_events,
+        "progressEvents": progress_events,
         "activeError": active_error,
     }
 
@@ -370,12 +401,16 @@ class GuiHandler(SimpleHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", "0"))
         payload = json.loads(self.rfile.read(length) or b"{}")
         operation = str(payload.get("operation", "read"))
+        array_mode = "burst-columns"
         row = int(payload.get("row", 0))
         col = int(payload.get("col", 0))
         zynq_password = str(payload.get("zynqPassword", ""))
         dry_run = bool(payload.get("dryRun", False))
         confirmed = bool(payload.get("confirmHardware", False))
-        if operation not in {"read", "set", "reset", "cycle", "read-array"} or not (0 <= row < GRID_SIZE and 0 <= col < GRID_SIZE):
+        if (
+            operation not in {"read", "set", "reset", "cycle", "read-array"}
+            or not (0 <= row < GRID_SIZE and 0 <= col < GRID_SIZE)
+        ):
             self._send_json({"error": "Invalid operation or cell."}, HTTPStatus.BAD_REQUEST)
             return
         if not dry_run and not confirmed:
@@ -390,6 +425,8 @@ class GuiHandler(SimpleHTTPRequestHandler):
         cmd = [sys.executable, str(ROOT / "api_v1" / "scan_debug_cli.py"), operation, "--run-dir", str(run_dir)]
         if operation != "read-array":
             cmd.extend(["--row", str(row), "--col", str(col)])
+        else:
+            cmd.extend(["--array-mode", array_mode])
         safe_cmd = list(cmd)
         if zynq_password:
             cmd.extend(["--zynq-password", zynq_password])
@@ -404,6 +441,7 @@ class GuiHandler(SimpleHTTPRequestHandler):
         self.running_commands[key] = {
             "proc": proc,
             "operation": operation,
+            "arrayMode": array_mode if operation == "read-array" else "",
             "row": row,
             "col": col,
             "runDir": str(run_dir.relative_to(ROOT)),
@@ -429,6 +467,7 @@ class GuiHandler(SimpleHTTPRequestHandler):
                     "external": False,
                     "returnCode": return_code,
                     "operation": item.get("operation"),
+                    "arrayMode": item.get("arrayMode", ""),
                     "row": item.get("row"),
                     "col": item.get("col"),
                     "runDir": item.get("runDir"),

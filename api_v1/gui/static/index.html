@@ -9,14 +9,15 @@
   <body>
     <main class="app">
       <header class="topbar">
-        <div>
-          <h1>Scan Monitor</h1>
-          <p id="subtitle">--</p>
+        <div class="brand-copy">
+          <h1>Debug Monitor</h1>
+        </div>
+        <div class="top-logo-frame">
+          <img class="top-logo" src="/assets/logo.png" alt="Evaluation Research Boards logo">
         </div>
         <div class="top-actions">
           <select id="runSelect" aria-label="Run"></select>
           <button id="followBtn" class="mode-btn active" type="button" title="Following latest run">FOLLOWING</button>
-          <button id="refreshBtn" class="icon-btn" type="button" title="Refresh now">R</button>
         </div>
       </header>
 
@@ -68,7 +69,7 @@
             </label>
             <label>Row <input id="rowInput" type="number" min="0" max="31" value="0"></label>
             <label>Col <input id="colInput" type="number" min="0" max="31" value="0"></label>
-            <label class="password-field">Zynq PW <input id="zynqPasswordInput" type="password" autocomplete="off"></label>
+            <label class="password-field">Password <input id="zynqPasswordInput" type="password" autocomplete="off"></label>
             <label class="checkbox"><input id="dryRunInput" type="checkbox" checked> Dry run</label>
             <div class="command-buttons">
               <button id="commandBtn" type="submit">Start</button>

@@ -118,7 +118,7 @@ class ScanDebugConfig:
     reset_sweep: SweepConfig = field(
         default_factory=lambda: SweepConfig.from_ranges(
             vcc_set_v=(2.0, 2.3, 2.6, 2.9, 3.2, 3.5),
-            vcc_wl_set_v=(0.5, 0.8, 1.1, 1.4, 1.7, 2.0),
+            vcc_wl_set_v=(0.5, 0.8, 1.1, 1.4, 1.7, 2.0, 2.5),
             threshold_uA=100.0,
             direction="below",
         )

@@ -2,6 +2,7 @@ const state = {
   selectedRun: "",
   activeKey: "",
   commandsEnabled: false,
+  manualRun: false,
 };
 
 const els = {
@@ -69,7 +70,7 @@ function ensureGrid() {
 }
 
 function renderRuns(runs, currentRunId) {
-  const previous = state.selectedRun || els.runSelect.value || currentRunId;
+  const previous = state.manualRun ? state.selectedRun || els.runSelect.value : currentRunId;
   els.runSelect.innerHTML = "";
   for (const run of runs) {
     const option = document.createElement("option");
@@ -96,12 +97,18 @@ function renderMetrics(summary) {
   els.opCompact.textContent = op;
   els.packetCompact.textContent = last?.packet || "--";
   els.opDot.className = `dot ${op === "read" ? "read" : op === "--" ? "" : "program"}`;
-  els.apiSignal.className = `signal ${last ? (last.ok ? "good" : "bad") : ""}`;
-  renderTicker(summary?.history || []);
+  els.apiSignal.className = `signal ${summary?.activeError ? "bad" : last ? (last.ok ? "good" : "bad") : ""}`;
+  renderTicker(summary);
 }
 
-function renderTicker(history) {
-  const rows = [...history].slice(-2).reverse().map(formatApiEvent);
+function renderTicker(summary) {
+  const history = summary?.history || [];
+  const logEvents = summary?.logEvents || [];
+  const rows = [...history, ...logEvents]
+    .sort((a, b) => eventOrder(a) - eventOrder(b))
+    .slice(-2)
+    .reverse()
+    .map(formatApiEvent);
   const first = rows[0] || "Waiting for the first API result.";
   const second = rows[1] || "--";
   els.tickerText.innerHTML = "";
@@ -113,7 +120,18 @@ function renderTicker(history) {
   }
 }
 
+function eventOrder(row) {
+  if (Number.isFinite(row.eventOrder)) return row.eventOrder;
+  if (Number.isFinite(row.updated)) return row.updated * 1000;
+  if (Number.isFinite(row.index)) return row.index;
+  const match = String(row.index || "").match(/capture_(\d+)/);
+  return match ? Number(match[1]) : 0;
+}
+
 function formatApiEvent(row) {
+  if (row.source === "log") {
+    return `ERROR: ${row.message}`;
+  }
   const cell = formatCell(row.cellAddress);
   const packet = row.packet ? `packet ${row.packet}` : "packet unknown";
   const rails = Number.isFinite(row.vcc_set_V) && Number.isFinite(row.vcc_wl_set_V)
@@ -346,7 +364,7 @@ function drawLabels(ctx, pulses, currentMin, currentMax, voltageMax, left, top, 
 }
 
 async function refresh() {
-  const query = state.selectedRun ? `?run=${encodeURIComponent(state.selectedRun)}` : "";
+  const query = state.manualRun && state.selectedRun ? `?run=${encodeURIComponent(state.selectedRun)}` : "";
   const response = await fetch(`/api/state${query}`, { cache: "no-store" });
   const data = await response.json();
   renderRuns(data.runs || [], data.state?.run?.id || "");
@@ -359,6 +377,7 @@ async function refresh() {
 }
 
 els.runSelect.addEventListener("change", () => {
+  state.manualRun = true;
   state.selectedRun = els.runSelect.value;
   refresh();
 });

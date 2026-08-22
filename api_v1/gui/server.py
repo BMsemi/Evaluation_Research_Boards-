@@ -5,6 +5,7 @@ import argparse
 import csv
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -72,6 +73,7 @@ def _read_manifest(path: Path) -> list[dict[str, Any]]:
                 row["vcc_set_V"] = _float_or_none(raw.get("vcc_set_V"))
                 row["vcc_wl_set_V"] = _float_or_none(raw.get("vcc_wl_set_V"))
                 row["ok"] = str(raw.get("ok", "")).lower() == "true"
+                row["eventOrder"] = (row["index"] or 0) + 0.9
                 rows.append(row)
     except FileNotFoundError:
         return []
@@ -85,24 +87,86 @@ def _manifest_for_run(run_dir: Path) -> Path:
     return run_dir / "manifest.csv"
 
 
+def _run_updated_at(run_dir: Path) -> float:
+    files = [path for path in run_dir.glob("manifest.csv")] + list(run_dir.glob("*.log"))
+    if not files:
+        return run_dir.stat().st_mtime
+    return max(path.stat().st_mtime for path in files)
+
+
 def _latest_run(runs_dir: Path) -> Path | None:
-    manifests = sorted(runs_dir.glob("*/manifest.csv"), key=lambda path: path.stat().st_mtime, reverse=True)
-    for manifest in manifests:
-        if _read_manifest(manifest):
-            return manifest.parent
-    return manifests[0].parent if manifests else None
+    run_dirs = sorted((path.parent for path in runs_dir.glob("*/manifest.csv")), key=_run_updated_at, reverse=True)
+    return run_dirs[0] if run_dirs else None
+
+
+def _recent_log_events(run_dir: Path) -> list[dict[str, Any]]:
+    events: list[dict[str, Any]] = []
+    for log_path in sorted(run_dir.glob("*.log"), key=lambda path: path.stat().st_mtime)[-12:]:
+        try:
+            text = log_path.read_text(errors="replace")
+        except OSError:
+            continue
+        message = _extract_error_message(text)
+        if not message:
+            continue
+        events.append(
+            {
+                "source": "log",
+                "index": log_path.stem,
+                "ok": False,
+                "message": message,
+                "path": str(log_path.relative_to(ROOT)),
+                "updated": log_path.stat().st_mtime,
+                "eventOrder": _log_event_order(log_path),
+            }
+        )
+    return events[-4:]
+
+
+def _log_event_order(path: Path) -> float:
+    match = re.search(r"capture_(\d+).*?_attempt(\d+)", path.name)
+    if match:
+        return int(match.group(1)) + min(int(match.group(2)), 80) / 100
+    match = re.search(r"capture_(\d+)", path.name)
+    if match:
+        return int(match.group(1)) + 0.1
+    return 0.0
+
+
+def _extract_error_message(text: str) -> str:
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    for line in reversed(lines):
+        if "error" in line.lower() or "traceback" in line.lower() or "exception" in line.lower():
+            return line[-220:]
+    return ""
+
+
+def _latest_manifest_mtime(run_dir: Path) -> float:
+    manifest = _manifest_for_run(run_dir)
+    return manifest.stat().st_mtime if manifest.exists() else 0.0
+
+
+def _active_error(run_dir: Path, rows: list[dict[str, Any]], log_events: list[dict[str, Any]]) -> dict[str, Any] | None:
+    if not log_events:
+        return None
+    last_log_error = log_events[-1]
+    last_row_order = float(rows[-1].get("eventOrder") or -1) if rows else -1
+    last_error_order = float(last_log_error.get("eventOrder") or -1)
+    if rows and rows[-1].get("ok") and last_row_order > last_error_order:
+        return None
+    return last_log_error
 
 
 def _run_choices(runs_dir: Path) -> list[dict[str, Any]]:
     choices = []
-    for manifest in sorted(runs_dir.glob("*/manifest.csv"), key=lambda path: path.stat().st_mtime, reverse=True):
+    for manifest in sorted(runs_dir.glob("*/manifest.csv"), key=lambda path: _run_updated_at(path.parent), reverse=True):
         rows = _read_manifest(manifest)
         choices.append(
             {
                 "id": manifest.parent.name,
                 "path": str(manifest.parent.relative_to(ROOT)),
                 "rows": len(rows),
-                "updated": manifest.stat().st_mtime,
+                "updated": _run_updated_at(manifest.parent),
             }
         )
     return choices
@@ -117,6 +181,8 @@ def _is_read_row(row: dict[str, Any]) -> bool:
 
 
 def _summarize(run_dir: Path, rows: list[dict[str, Any]]) -> dict[str, Any]:
+    log_events = _recent_log_events(run_dir)
+    active_error = _active_error(run_dir, rows, log_events)
     latest_read_by_cell: dict[str, dict[str, Any]] = {}
     reads: list[dict[str, Any]] = []
     programs: list[dict[str, Any]] = []
@@ -161,7 +227,7 @@ def _summarize(run_dir: Path, rows: list[dict[str, Any]]) -> dict[str, Any]:
         "run": {
             "id": run_dir.name,
             "path": str(run_dir.relative_to(ROOT)),
-            "updated": _manifest_for_run(run_dir).stat().st_mtime if _manifest_for_run(run_dir).exists() else None,
+            "updated": _run_updated_at(run_dir),
         },
         "last": last,
         "lastCell": last_cell,
@@ -181,6 +247,8 @@ def _summarize(run_dir: Path, rows: list[dict[str, Any]]) -> dict[str, Any]:
         "cells": list(latest_read_by_cell.values()),
         "history": rows[-160:],
         "readHistory": reads[-160:],
+        "logEvents": log_events,
+        "activeError": active_error,
     }
 
 

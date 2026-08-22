@@ -271,9 +271,32 @@ class ScanDebugCellAPI:
         for vcc_set_v in sweep.vcc_set_v:
             for vcc_wl_set_v in sweep.vcc_wl_set_v:
                 rails = RailVoltages(vcc_set_v, vcc_wl_set_v)
+                pre_read: CellOperationResult | None = None
+                if operation in ("set", "reset"):
+                    pre_read = self._pulse_and_capture(cell, "read", self.config.read_rails, f"read_before_{operation}")
+                    if pre_read.current_uA is not None and self._passes(pre_read.current_uA, sweep.threshold_uA, sweep.direction):
+                        confirms = self.confirm_reads(cell, sweep.confirm_reads, sweep.threshold_uA, sweep.direction)
+                        target_hit = all(
+                            item.current_uA is not None and self._passes(item.current_uA, sweep.threshold_uA, sweep.direction)
+                            for item in confirms
+                        )
+                        entry = {
+                            "pre_read": asdict(pre_read),
+                            "pulse": None,
+                            "verify": asdict(pre_read),
+                            "confirm_reads": [asdict(item) for item in confirms],
+                            "threshold_uA": sweep.threshold_uA,
+                            "direction": sweep.direction,
+                            "skipped_pulse": target_hit,
+                        }
+                        results.append(entry)
+                        best = pre_read
+                        if target_hit and sweep.stop_on_threshold:
+                            break
                 pulse = self._pulse_and_capture(cell, operation, rails, f"{operation}_pulse")
                 verify = self._pulse_and_capture(cell, "read", self.config.read_rails, f"read_after_{operation}")
                 entry = {
+                    "pre_read": asdict(pre_read) if pre_read else None,
                     "pulse": asdict(pulse),
                     "verify": asdict(verify),
                     "threshold_uA": sweep.threshold_uA,

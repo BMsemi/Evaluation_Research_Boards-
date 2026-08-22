@@ -176,10 +176,22 @@ dt {
 }
 
 .scale {
-  min-width: 170px;
-  text-align: right;
+  display: grid;
+  grid-template-columns: auto 110px auto;
+  align-items: center;
+  gap: 6px;
   color: var(--muted);
   font-variant-numeric: tabular-nums;
+  font-size: 11px;
+}
+
+.scale-bar {
+  display: block;
+  height: 9px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 999px;
+  background: linear-gradient(90deg, hsl(205, 78%, 38%), #4cc9a6, hsl(35, 78%, 58%));
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.2);
 }
 
 .heatmap {

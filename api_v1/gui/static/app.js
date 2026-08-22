@@ -15,7 +15,8 @@ const els = {
   lastCell: document.getElementById("lastCell"),
   lastCurrent: document.getElementById("lastCurrent"),
   heatmap: document.getElementById("heatmap"),
-  scale: document.getElementById("scale"),
+  scaleMin: document.getElementById("scaleMin"),
+  scaleMax: document.getElementById("scaleMax"),
   activeCell: document.getElementById("activeCell"),
   opDot: document.getElementById("opDot"),
   opCompact: document.getElementById("opCompact"),
@@ -157,8 +158,8 @@ function formatApiEvent(row) {
 
 function renderHeatmap(summary) {
   ensureGrid();
-  const min = summary?.scale?.min_uA;
-  const max = summary?.scale?.max_uA;
+  const min = 100;
+  const max = 400;
   const activeKey = cellKey(summary?.lastCell);
   const latest = new Map();
   for (const item of summary?.cells || []) latest.set(cellKey(item.cellAddress), item);
@@ -169,7 +170,8 @@ function renderHeatmap(summary) {
     node.classList.toggle("active", node.dataset.key === activeKey);
     node.title = item ? `${formatCell(item.cellAddress)} ${formatCurrent(value)} uA ${item.operation}` : `${node.dataset.key}: no read`;
   }
-  els.scale.textContent = Number.isFinite(min) && Number.isFinite(max) ? `${min.toFixed(1)}...${max.toFixed(1)} uA` : "--";
+  els.scaleMin.textContent = `HRS ${min.toFixed(0)}`;
+  els.scaleMax.textContent = `LRS ${max.toFixed(0)}uA`;
 }
 
 function renderChart(summary) {

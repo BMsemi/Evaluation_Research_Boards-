@@ -7,6 +7,7 @@ const state = {
 
 const els = {
   runSelect: document.getElementById("runSelect"),
+  followBtn: document.getElementById("followBtn"),
   refreshBtn: document.getElementById("refreshBtn"),
   subtitle: document.getElementById("subtitle"),
   apiSignal: document.getElementById("apiSignal"),
@@ -82,6 +83,14 @@ function renderRuns(runs, currentRunId) {
     els.runSelect.value = previous;
   }
   state.selectedRun = els.runSelect.value;
+  renderFollowMode();
+}
+
+function renderFollowMode() {
+  els.followBtn.textContent = state.manualRun ? "PINNED" : "FOLLOWING";
+  els.followBtn.title = state.manualRun ? "Pinned to selected run. Click to follow latest." : "Following latest active run. Click to pin current run.";
+  els.followBtn.classList.toggle("active", !state.manualRun);
+  els.followBtn.classList.toggle("pinned", state.manualRun);
 }
 
 function renderMetrics(summary) {
@@ -379,6 +388,12 @@ async function refresh() {
 els.runSelect.addEventListener("change", () => {
   state.manualRun = true;
   state.selectedRun = els.runSelect.value;
+  refresh();
+});
+els.followBtn.addEventListener("click", () => {
+  state.manualRun = !state.manualRun;
+  if (!state.manualRun) state.selectedRun = "";
+  renderFollowMode();
   refresh();
 });
 els.refreshBtn.addEventListener("click", refresh);

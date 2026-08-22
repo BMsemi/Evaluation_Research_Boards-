@@ -63,9 +63,13 @@ def build_config(args: argparse.Namespace) -> ScanDebugConfig:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Scan-debug cell read/set/reset API CLI")
-    parser.add_argument("operation", choices=["read", "set", "reset", "cycle"])
-    parser.add_argument("--row", type=int, required=True)
+    parser.add_argument("operation", choices=["read", "set", "reset", "cycle", "read-array"])
+    parser.add_argument("--row", type=int)
     parser.add_argument("--col", type=int, default=0)
+    parser.add_argument("--row-start", type=int, default=0)
+    parser.add_argument("--row-end", type=int, default=31)
+    parser.add_argument("--col-start", type=int, default=0)
+    parser.add_argument("--col-end", type=int, default=31)
     parser.add_argument("--run-dir", default=f"api_v1/runs/run_{time.strftime('%Y%m%d_%H%M%S_IST')}")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--attempts", type=int, default=int(os.environ.get("SCAN_DEBUG_ATTEMPTS", "3")))
@@ -95,6 +99,8 @@ def main() -> int:
         default=os.environ.get("SCAN_DEBUG_ADC_DAC_PORT", "/dev/serial/by-id/usb-Teensyduino_USB_Serial_8829000-if00"),
     )
     args = parser.parse_args()
+    if args.operation != "read-array" and args.row is None:
+        parser.error("--row is required unless operation is read-array")
 
     api = ScanDebugCellAPI(build_config(args))
     if args.operation == "read":
@@ -103,8 +109,10 @@ def main() -> int:
         result = api.set_cell(args.row, args.col)
     elif args.operation == "reset":
         result = api.reset_cell(args.row, args.col)
-    else:
+    elif args.operation == "cycle":
         result = api.cycle_cell(args.row, args.col)
+    else:
+        result = api.read_array(args.row_start, args.row_end, args.col_start, args.col_end)
     print(json.dumps(result if isinstance(result, dict) else result.__dict__, default=lambda item: item.__dict__, indent=2))
     return 0
 

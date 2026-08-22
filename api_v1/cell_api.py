@@ -242,6 +242,33 @@ class ScanDebugCellAPI:
         cell = CellAddress(row, col)
         return self._pulse_and_capture(cell, "read", self.config.read_rails, "read")
 
+    def read_array(
+        self,
+        row_start: int = 0,
+        row_end: int = 31,
+        col_start: int = 0,
+        col_end: int = 31,
+    ) -> dict[str, object]:
+        if not 0 <= row_start <= row_end <= 31:
+            raise ValueError(f"row range must be 0..31, got {row_start}..{row_end}")
+        if not 0 <= col_start <= col_end <= 31:
+            raise ValueError(f"col range must be 0..31, got {col_start}..{col_end}")
+        reads: list[dict[str, object]] = []
+        for row in range(row_start, row_end + 1):
+            for col in range(col_start, col_end + 1):
+                reads.append(asdict(self.read(row, col)))
+        summary = {
+            "operation": "read-array",
+            "row_start": row_start,
+            "row_end": row_end,
+            "col_start": col_start,
+            "col_end": col_end,
+            "count": len(reads),
+            "reads": reads,
+        }
+        self._append_jsonl("array_reads.jsonl", summary)
+        return summary
+
     def set_cell(self, row: int, col: int = 0) -> dict[str, object]:
         return self._ramp_until(CellAddress(row, col), "set", self.config.set_sweep)
 

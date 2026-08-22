@@ -213,11 +213,13 @@ function renderChart(summary) {
   const yZero = bottomY + bottomH / 2;
   const yVoltage = (value) => yZero - (value / voltageMax) * (bottomH / 2 - 6);
 
+  drawPhaseBands(ctx, pulses, xFor, padLeft, plotW, bottomY, bottomH);
   drawAxes(ctx, padLeft, padTop, plotW, topH, bottomY, bottomH, rect.width, rect.height);
   drawThresholds(ctx, padLeft, plotW, yCurrent, currentMin, currentMax, summary?.thresholds_uA || {});
   drawTransition(ctx, pulses, xFor, padTop, topH, bottomY, bottomH);
   drawCurrentTrace(ctx, pulses, xFor, yCurrent);
   drawVoltageBars(ctx, pulses, xFor, yZero, yVoltage);
+  drawActiveVoltageBadge(ctx, summary?.last, padLeft, plotW, bottomY);
   drawLabels(ctx, pulses, currentMin, currentMax, voltageMax, padLeft, padTop, topH, bottomY, rect.height);
 }
 
@@ -236,6 +238,8 @@ function buildPulseSeries(history) {
         op: row.operation,
         packet: row.packet,
         voltage: signedVoltage(row),
+        wl: row.vcc_wl_set_V,
+        vcc: row.vcc_set_V,
         current: null,
       };
       pulses.push(pending);
@@ -333,6 +337,31 @@ function drawTransition(ctx, pulses, xFor, top, topH, bottomY, bottomH) {
   ctx.setLineDash([]);
 }
 
+function drawPhaseBands(ctx, pulses, xFor, left, width, bottomY, bottomH) {
+  const bands = [];
+  let start = null;
+  let op = null;
+  pulses.forEach((item, index) => {
+    const nextOp = item.op === "set" || item.op === "reset" ? item.op : op;
+    if (nextOp !== op) {
+      if (op && start !== null) bands.push({ op, start, end: index - 1 });
+      op = nextOp;
+      start = index;
+    }
+  });
+  if (op && start !== null) bands.push({ op, start, end: pulses.length - 1 });
+
+  bands.forEach((band) => {
+    const x1 = band.start <= 0 ? left : xFor(band.start) - 4;
+    const x2 = band.end >= pulses.length - 1 ? left + width : xFor(band.end) + 4;
+    ctx.fillStyle = band.op === "set" ? "rgba(255, 59, 79, 0.08)" : "rgba(106, 182, 223, 0.1)";
+    ctx.fillRect(x1, bottomY, Math.max(2, x2 - x1), bottomH);
+    ctx.fillStyle = band.op === "set" ? "#ff6c79" : "#8bcced";
+    ctx.font = "600 11px system-ui";
+    ctx.fillText(band.op.toUpperCase(), x1 + 6, bottomY + 14);
+  });
+}
+
 function drawCurrentTrace(ctx, pulses, xFor, yCurrent) {
   const points = pulses
     .map((item, index) => ({ ...item, index }))
@@ -375,6 +404,21 @@ function drawVoltageBars(ctx, pulses, xFor, yZero, yVoltage) {
   });
 }
 
+function drawActiveVoltageBadge(ctx, row, left, width, bottomY) {
+  if (!row || !(row.operation === "set" || row.operation === "reset")) return;
+  const op = row.operation.toUpperCase();
+  const color = row.operation === "set" ? "#ff6c79" : "#8bcced";
+  const text = `${op}  Vcc ${row.vcc_set_V ?? "--"}V  WL ${row.vcc_wl_set_V ?? "--"}V`;
+  ctx.font = "600 12px system-ui";
+  const textW = ctx.measureText(text).width;
+  const x = left + width - textW - 10;
+  const y = bottomY + 17;
+  ctx.fillStyle = "rgba(17, 19, 24, 0.9)";
+  ctx.fillRect(x - 6, y - 13, textW + 12, 18);
+  ctx.fillStyle = color;
+  ctx.fillText(text, x, y);
+}
+
 function drawLabels(ctx, pulses, currentMin, currentMax, voltageMax, left, top, topH, bottomY, totalH) {
   const cell = pulses.find((item) => item.cell)?.cell;
   ctx.fillStyle = "#f3f5f7";
@@ -410,11 +454,20 @@ function renderCommandState(commands) {
   const running = commands.find((command) => command.running);
   state.runningCommandId = running?.id || "";
   els.commandBtn.disabled = !state.commandsEnabled || Boolean(running);
-  els.killBtn.disabled = !running;
+  els.commandBtn.textContent = running ? "Processing..." : "Start";
+  els.killBtn.disabled = !running || !running.canKill;
   if (!state.commandsEnabled) {
     els.commandNote.textContent = "--allow-commands";
   } else if (running) {
-    els.commandNote.textContent = `Processing ${running.operation} r${running.row} c${running.col}`;
+    if (running.operation && [...els.operationInput.options].some((option) => option.value === running.operation)) {
+      els.operationInput.value = running.operation;
+    }
+    if (Number.isFinite(running.row)) els.rowInput.value = running.row;
+    if (Number.isFinite(running.col)) els.colInput.value = running.col;
+    const target = running.operation === "read-array" ? "32x32 array" :
+      Number.isFinite(running.row) ? `r${running.row} c${running.col ?? 0}` : "API";
+    const source = running.external ? "external " : "";
+    els.commandNote.textContent = `Processing ${source}${running.operation} ${target}`;
   } else {
     els.commandNote.textContent = "Ready";
   }
@@ -434,7 +487,12 @@ els.followBtn.addEventListener("click", () => {
 els.refreshBtn.addEventListener("click", refresh);
 els.killBtn.addEventListener("click", async () => {
   if (!state.runningCommandId) return;
-  const ok = window.confirm("Kill the GUI-started command that is processing now?");
+  const external = state.runningCommandId.startsWith("pid-");
+  const ok = window.confirm(
+    external
+      ? `Kill external API process ${state.runningCommandId}?\n\nOnly do this if you are sure this scan_debug_cli.py run should stop.`
+      : "Kill the GUI-started command that is processing now?"
+  );
   if (!ok) return;
   const response = await fetch("/api/command/kill", {
     method: "POST",
@@ -455,9 +513,11 @@ els.commandForm.addEventListener("submit", async (event) => {
     dryRun: els.dryRunInput.checked,
   };
   if (!payload.dryRun) {
+    const target = payload.operation === "read-array" ? "the full 32x32 array" : `row ${payload.row}, col ${payload.col}`;
+    const extra = payload.operation === "read-array" ? "\n\nThis will read 1024 cells and may take a long time." : "";
     const ok = window.confirm(
-      `Send ${payload.operation.toUpperCase()} to hardware for row ${payload.row}, col ${payload.col}?\n\n` +
-      "This will run the API against the connected bench."
+      `Send ${payload.operation.toUpperCase()} to hardware for ${target}?\n\n` +
+      "This will run the API against the connected bench." + extra
     );
     if (!ok) {
       els.commandNote.textContent = "Cancelled";

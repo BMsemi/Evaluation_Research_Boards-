@@ -7,6 +7,7 @@ import json
 import os
 import re
 import signal
+import shlex
 import subprocess
 import sys
 import time
@@ -194,6 +195,36 @@ def _read_thresholds(run_dir: Path) -> dict[str, float]:
     return thresholds
 
 
+def _parse_scan_debug_process(command: str) -> dict[str, Any]:
+    try:
+        parts = shlex.split(command)
+    except ValueError:
+        parts = command.split()
+    script_index = next((index for index, part in enumerate(parts) if part.endswith("scan_debug_cli.py")), -1)
+    operation = parts[script_index + 1] if script_index >= 0 and script_index + 1 < len(parts) else "api"
+
+    def flag_value(flag: str) -> str | None:
+        if flag not in parts:
+            return None
+        index = parts.index(flag)
+        return parts[index + 1] if index + 1 < len(parts) else None
+
+    row = _int_or_none(flag_value("--row"))
+    col = _int_or_none(flag_value("--col"))
+    run_dir = flag_value("--run-dir")
+    out: dict[str, Any] = {"operation": operation}
+    if row is not None:
+        out["row"] = row
+    if col is not None:
+        out["col"] = col
+    if run_dir:
+        try:
+            out["runDir"] = str(Path(run_dir).resolve().relative_to(ROOT))
+        except ValueError:
+            out["runDir"] = run_dir
+    return out
+
+
 def _run_choices(runs_dir: Path) -> list[dict[str, Any]]:
     choices = []
     for manifest in sorted(runs_dir.glob("*/manifest.csv"), key=lambda path: _run_updated_at(path.parent), reverse=True):
@@ -344,7 +375,7 @@ class GuiHandler(SimpleHTTPRequestHandler):
         zynq_password = str(payload.get("zynqPassword", ""))
         dry_run = bool(payload.get("dryRun", False))
         confirmed = bool(payload.get("confirmHardware", False))
-        if operation not in {"read", "set", "reset", "cycle"} or not (0 <= row < GRID_SIZE and 0 <= col < GRID_SIZE):
+        if operation not in {"read", "set", "reset", "cycle", "read-array"} or not (0 <= row < GRID_SIZE and 0 <= col < GRID_SIZE):
             self._send_json({"error": "Invalid operation or cell."}, HTTPStatus.BAD_REQUEST)
             return
         if not dry_run and not confirmed:
@@ -353,9 +384,12 @@ class GuiHandler(SimpleHTTPRequestHandler):
         if any(state["proc"].poll() is None for state in self.running_commands.values()):
             self._send_json({"error": "A GUI command is already processing."}, HTTPStatus.CONFLICT)
             return
-        run_dir = ROOT / "api_v1" / "runs" / f"gui_{time.strftime('%Y%m%d_%H%M%S')}_r{row:02d}c{col:02d}_{operation}"
+        run_label = "array" if operation == "read-array" else f"r{row:02d}c{col:02d}"
+        run_dir = ROOT / "api_v1" / "runs" / f"gui_{time.strftime('%Y%m%d_%H%M%S')}_{run_label}_{operation}"
         run_dir.mkdir(parents=True, exist_ok=True)
-        cmd = [sys.executable, str(ROOT / "api_v1" / "scan_debug_cli.py"), operation, "--row", str(row), "--col", str(col), "--run-dir", str(run_dir)]
+        cmd = [sys.executable, str(ROOT / "api_v1" / "scan_debug_cli.py"), operation, "--run-dir", str(run_dir)]
+        if operation != "read-array":
+            cmd.extend(["--row", str(row), "--col", str(col)])
         safe_cmd = list(cmd)
         if zynq_password:
             cmd.extend(["--zynq-password", zynq_password])
@@ -381,14 +415,18 @@ class GuiHandler(SimpleHTTPRequestHandler):
 
     def _command_state(self) -> list[dict[str, Any]]:
         states = []
+        tracked_pids = set()
         for key, item in list(self.running_commands.items()):
             proc = item["proc"]
             return_code = proc.poll()
+            tracked_pids.add(proc.pid)
             states.append(
                 {
                     "id": key,
                     "pid": proc.pid,
                     "running": return_code is None,
+                    "canKill": return_code is None,
+                    "external": False,
                     "returnCode": return_code,
                     "operation": item.get("operation"),
                     "row": item.get("row"),
@@ -402,6 +440,35 @@ class GuiHandler(SimpleHTTPRequestHandler):
                 if log_handle:
                     log_handle.close()
                 self.running_commands.pop(key, None)
+        states.extend(self._external_command_state(tracked_pids))
+        return states
+
+    def _external_command_state(self, tracked_pids: set[int]) -> list[dict[str, Any]]:
+        try:
+            proc = subprocess.run(["ps", "-axo", "pid,command"], text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        except OSError:
+            return []
+        states: list[dict[str, Any]] = []
+        for line in proc.stdout.splitlines():
+            line = line.strip()
+            if "scan_debug_cli.py" not in line:
+                continue
+            pid_text, _, command = line.partition(" ")
+            pid = _int_or_none(pid_text)
+            if pid is None or pid in tracked_pids or pid == os.getpid():
+                continue
+            parsed = _parse_scan_debug_process(command)
+            states.append(
+                {
+                    "id": f"pid-{pid}",
+                    "pid": pid,
+                    "running": True,
+                    "canKill": True,
+                    "external": True,
+                    "returnCode": None,
+                    **parsed,
+                }
+            )
         return states
 
     def _kill_command(self) -> None:
@@ -409,19 +476,41 @@ class GuiHandler(SimpleHTTPRequestHandler):
         payload = json.loads(self.rfile.read(length) or b"{}")
         command_id = str(payload.get("id", ""))
         item = self.running_commands.get(command_id)
-        if not item:
-            self._send_json({"error": "No matching GUI command is running."}, HTTPStatus.NOT_FOUND)
+        if item:
+            proc = item["proc"]
+            if proc.poll() is not None:
+                self._send_json({"error": "Command already finished."}, HTTPStatus.CONFLICT)
+                return
+            try:
+                os.killpg(proc.pid, signal.SIGTERM)
+            except OSError:
+                proc.terminate()
+            item["killed"] = time.time()
+            self._send_json({"ok": True, "id": command_id, "message": "Kill signal sent."})
             return
-        proc = item["proc"]
-        if proc.poll() is not None:
-            self._send_json({"error": "Command already finished."}, HTTPStatus.CONFLICT)
-            return
+        if command_id.startswith("pid-"):
+            pid = _int_or_none(command_id.removeprefix("pid-"))
+            if pid is not None and self._is_external_scan_debug_pid(pid):
+                try:
+                    os.kill(pid, signal.SIGTERM)
+                except OSError as exc:
+                    self._send_json({"error": str(exc)}, HTTPStatus.CONFLICT)
+                    return
+                self._send_json({"ok": True, "id": command_id, "message": f"Kill signal sent to PID {pid}."})
+                return
+        self._send_json({"error": "No matching GUI/API command is running."}, HTTPStatus.NOT_FOUND)
+
+    def _is_external_scan_debug_pid(self, pid: int) -> bool:
         try:
-            os.killpg(proc.pid, signal.SIGTERM)
+            proc = subprocess.run(["ps", "-p", str(pid), "-o", "command="], text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
         except OSError:
-            proc.terminate()
-        item["killed"] = time.time()
-        self._send_json({"ok": True, "id": command_id, "message": "Kill signal sent."})
+            return False
+        command = proc.stdout.strip()
+        if "scan_debug_cli.py" not in command:
+            return False
+        parsed = _parse_scan_debug_process(command)
+        run_dir = str(parsed.get("runDir", ""))
+        return not run_dir or run_dir.startswith("api_v1/runs/")
 
     def _send_json(self, item: Any, status: HTTPStatus = HTTPStatus.OK) -> None:
         body = json.dumps(item, indent=2).encode()

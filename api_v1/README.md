@@ -356,6 +356,12 @@ python api_v1/scan_debug_cli.py reset --row 5 --col 0 \
   --reset-threshold 130
 ```
 
+Full 32 by 32 array read:
+
+```bash
+python api_v1/scan_debug_cli.py read-array
+```
+
 ## Cross-Platform Notes
 
 The API itself is pure Python and runs on macOS, Ubuntu, or Windows. Hardware access uses external tools:

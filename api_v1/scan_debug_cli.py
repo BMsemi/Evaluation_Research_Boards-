@@ -63,7 +63,7 @@ def main() -> int:
     parser.add_argument("operation", choices=["read", "set", "reset", "cycle"])
     parser.add_argument("--row", type=int, required=True)
     parser.add_argument("--col", type=int, default=0)
-    parser.add_argument("--run-dir", default=f"scan_debug_cell_api/runs/run_{time.strftime('%Y%m%d_%H%M%S_IST')}")
+    parser.add_argument("--run-dir", default=f"api_v1/runs/run_{time.strftime('%Y%m%d_%H%M%S_IST')}")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--attempts", type=int, default=3)
     parser.add_argument("--confirm-reads", type=int, default=10)

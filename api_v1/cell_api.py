@@ -18,7 +18,7 @@ from typing import Iterable, Literal
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_SUMMARIZER = ROOT / "TEST_Bench/cell030_form_then_set_skew_20260815_IST/summarize_capture.py"
+DEFAULT_SUMMARIZER = ROOT / "api_v1/tools/summarize_capture.py"
 MANIFEST_FIELDS = [
     "index",
     "stage",
@@ -105,7 +105,7 @@ class SweepConfig:
 
 @dataclass
 class ScanDebugConfig:
-    run_dir: Path = ROOT / "TEST_Bench/scan_debug_cell_api/runs/default"
+    run_dir: Path = ROOT / "api_v1/runs/default"
     read_rails: RailVoltages = field(default_factory=lambda: RailVoltages(1.2, 2.5))
     set_sweep: SweepConfig = field(
         default_factory=lambda: SweepConfig.from_ranges(

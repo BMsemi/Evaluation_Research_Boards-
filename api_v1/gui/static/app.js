@@ -200,11 +200,14 @@ function renderChart(summary) {
   const currentValues = pulses.map((item) => item.current).filter(Number.isFinite);
   const thresholdValues = Object.values(summary?.thresholds_uA || {}).map(Number).filter(Number.isFinite);
   const rawMin = Math.min(...currentValues, 0);
-  const rawMax = Math.max(...currentValues, ...thresholdValues, 200);
+  const rawMax = 400;
   const currentMin = Math.floor(rawMin / 25) * 25;
   const currentMax = Math.ceil(rawMax / 25) * 25;
   const currentSpan = currentMax === currentMin ? 1 : currentMax - currentMin;
-  const yCurrent = (value) => padTop + topH - ((value - currentMin) / currentSpan) * topH;
+  const yCurrent = (value) => {
+    const clamped = Math.max(currentMin, Math.min(currentMax, value));
+    return padTop + topH - ((clamped - currentMin) / currentSpan) * topH;
+  };
 
   const voltageMax = Math.max(2, ...pulses.map((item) => Math.abs(item.voltage || 0)));
   const yZero = bottomY + bottomH / 2;

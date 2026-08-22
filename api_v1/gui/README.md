@@ -32,4 +32,6 @@ python api_v1/gui/server.py --allow-commands
 
 The heatmap is a 32 by 32 1Kbit grid. Each cell displays the last recorded current from the selected run, and the latest read/program cell blinks while new manifest rows arrive.
 
+The GUI's array-read command uses the CLI default `read-array` mode. Current default is burst mode: one FPGA sequence bitstream plus one Saleae-side burst helper fills the normal API manifest for all 1024 cells. Use the CLI directly with `--array-mode serial` if the old per-cell read loop is needed for debugging.
+
 Existing background API processes are not stopped by the GUI. Start new commands from the browser only when the bench is ready for another operation.

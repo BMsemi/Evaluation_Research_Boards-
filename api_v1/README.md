@@ -356,11 +356,21 @@ python api_v1/scan_debug_cli.py reset --row 5 --col 0 \
   --reset-threshold 130
 ```
 
-Full 32 by 32 array read:
+Fast full 32 by 32 array read:
 
 ```bash
 python api_v1/scan_debug_cli.py read-array
 ```
+
+This uses burst mode by default. The API programs one FPGA sequence bitstream, starts one Saleae-side burst helper, and records all 1024 read packets into the normal `manifest.csv` for the GUI heatmap.
+
+Old per-cell behavior is still available:
+
+```bash
+python api_v1/scan_debug_cli.py read-array --array-mode serial
+```
+
+Burst mode currently supports the full 32 by 32 array. Use serial mode for sub-ranges.
 
 ## Cross-Platform Notes
 
@@ -393,6 +403,7 @@ Teensy DAC/ADC firmware copied into this API folder:
 Saleae Ubuntu capture helper:
 
 - [prerequisites/saleae_ubuntu/run_fpga_scan0000_la12_15_capture.py](./prerequisites/saleae_ubuntu/run_fpga_scan0000_la12_15_capture.py)
+- [prerequisites/saleae_ubuntu/run_full_array_burst_capture.py](./prerequisites/saleae_ubuntu/run_full_array_burst_capture.py)
 
 Local summarizer used by the API:
 

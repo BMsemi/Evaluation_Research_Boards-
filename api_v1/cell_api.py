@@ -146,6 +146,7 @@ class ScanDebugConfig:
     saleae_host: str | None = "ubuntu-24-04@100.98.132.51"
     saleae_dir: str = "/home/ubuntu-24-04/saleae-api"
     saleae_capture_script: str = ".venv/bin/python run_fpga_scan0000_la12_15_capture.py"
+    saleae_burst_capture_script: str = ".venv/bin/python run_full_array_burst_capture.py"
     saleae_restart_script: str = "./start-logic2-automation.sh"
     saleae_restart_wait_seconds: float = 10.0
     adc_dac_port: str = "/dev/serial/by-id/usb-Teensyduino_USB_Serial_8829000-if00"
@@ -160,6 +161,10 @@ class ScanDebugConfig:
     trim_data_seconds: float = 0.000003
     digital_threshold_volts: float = 1.2
     enable_adc_monitor: bool = True
+    burst_initial_delay_cycles: int = 40_000_000
+    burst_repeat_after_done_cycles: int = 10_000_000
+    burst_after_trigger_seconds: float = 0.000028
+    burst_trim_data_seconds: float = 0.000003
 
 
 @dataclass
@@ -258,11 +263,17 @@ class ScanDebugCellAPI:
         row_end: int = 31,
         col_start: int = 0,
         col_end: int = 31,
+        *,
+        mode: Literal["burst", "serial"] = "burst",
     ) -> dict[str, object]:
         if not 0 <= row_start <= row_end <= 31:
             raise ValueError(f"row range must be 0..31, got {row_start}..{row_end}")
         if not 0 <= col_start <= col_end <= 31:
             raise ValueError(f"col range must be 0..31, got {col_start}..{col_end}")
+        if mode == "burst":
+            return self.read_array_burst(row_start, row_end, col_start, col_end)
+        if mode != "serial":
+            raise ValueError(f"array mode must be burst or serial, got {mode!r}")
         reads: list[dict[str, object]] = []
         for row in range(row_start, row_end + 1):
             for col in range(col_start, col_end + 1):
@@ -274,6 +285,57 @@ class ScanDebugCellAPI:
             "col_start": col_start,
             "col_end": col_end,
             "count": len(reads),
+            "reads": reads,
+        }
+        self._append_jsonl("array_reads.jsonl", summary)
+        return summary
+
+    def read_array_burst(
+        self,
+        row_start: int = 0,
+        row_end: int = 31,
+        col_start: int = 0,
+        col_end: int = 31,
+    ) -> dict[str, object]:
+        if (row_start, row_end, col_start, col_end) != (0, 31, 0, 31):
+            raise ValueError("burst array read currently supports the full 32x32 array only; use mode='serial' for sub-ranges")
+        cells = self._array_sweep_cells(row_start, col_start)
+        packet = packet_for_cell(CellAddress(row_start, col_start), 0)
+        bitstream = self._ensure_array_bitstream(row_start, col_start)
+        if self.config.dry_run:
+            summary = {
+                "operation": "read-array",
+                "mode": "burst",
+                "row_start": row_start,
+                "row_end": row_end,
+                "col_start": col_start,
+                "col_end": col_end,
+                "count": len(cells),
+                "start_packet": f"0x{packet:04x}",
+                "bitstream": bitstream,
+                "rails": asdict(self.config.read_rails),
+                "dry_run": True,
+            }
+            self._append_jsonl("array_reads.jsonl", summary)
+            return summary
+
+        self._ensure_saleae_burst_script()
+        index = self._next_index()
+        remote_output_dir = self._capture_array_burst(packet, self.config.read_rails, bitstream, index, len(cells), row_start, col_start)
+        local_output_dir = self._copy_capture(remote_output_dir, index, "read_array_burst", self.config.read_rails)
+        reads = self._append_burst_manifest(local_output_dir, remote_output_dir, bitstream)
+        summary = {
+            "operation": "read-array",
+            "mode": "burst",
+            "row_start": row_start,
+            "row_end": row_end,
+            "col_start": col_start,
+            "col_end": col_end,
+            "count": len(reads),
+            "start_packet": f"0x{packet:04x}",
+            "bitstream": bitstream,
+            "remote_output_dir": remote_output_dir,
+            "local_output_dir": str(local_output_dir),
             "reads": reads,
         }
         self._append_jsonl("array_reads.jsonl", summary)
@@ -498,6 +560,184 @@ write_bitstream -force [file join $script_dir $bit_name]
 puts "BUILT $bit_name fpga-reset delayed packet=0x{packet:04x}"
 exit
 """
+
+    def _ensure_array_bitstream(self, row_start: int, col_start: int) -> str:
+        bit_name = f"caravel_scan_debug_fpga_array_read_r{row_start:02d}c{col_start:02d}_burst.bit"
+        if self.config.dry_run:
+            return bit_name
+        if self._remote_file_exists(bit_name):
+            return bit_name
+        tcl_name = f"build_scan_debug_array_read_r{row_start:02d}c{col_start:02d}_burst.tcl"
+        tcl = self._build_array_tcl(row_start, col_start, bit_name)
+        self._write_remote_text(tcl_name, tcl)
+        proc = self._run_zynq(f"{self.config.vivado_cmd} -mode batch -source {tcl_name}", timeout_s=900)
+        if proc.returncode != 0:
+            raise RuntimeError(proc.stdout)
+        return bit_name
+
+    @staticmethod
+    def _array_sweep_cells(row_start: int = 0, col_start: int = 0) -> list[CellAddress]:
+        cells = [CellAddress(row, 0) for row in range(32)]
+        for col in range(1, 32):
+            cells.extend(CellAddress(row, col) for row in range(32))
+        start = CellAddress(row_start, col_start)
+        try:
+            start_index = cells.index(start)
+        except ValueError as exc:
+            raise ValueError(f"start cell ({row_start},{col_start}) is not in the array sweep order") from exc
+        return cells[start_index:]
+
+    def _build_array_tcl(self, row_start: int, col_start: int, bit_name: str) -> str:
+        return f"""set script_dir [file dirname [file normalize [info script]]]
+set part_name "xc7z020clg400-2"
+set project_name "vivado_project_array_read_r{row_start:02d}c{col_start:02d}_burst"
+set project_dir [file join $script_dir $project_name]
+set bit_name "{bit_name}"
+set xdc_file [file join $script_dir "caravel_scan_debug_fpga.xdc"]
+
+if {{[file exists $project_dir]}} {{
+    file delete -force $project_dir
+}}
+
+create_project $project_name $project_dir -part $part_name -force
+add_files [file join $script_dir "caravel_scan_debug_fpga.v"]
+set_property top caravel_scan_debug_fpga [current_fileset]
+add_files -fileset constrs_1 $xdc_file
+
+synth_design -top caravel_scan_debug_fpga -part $part_name -generic [list \\
+    OP_SET=0 \\
+    SEQUENCE_MODE=1 \\
+    INITIAL_SEQUENCE_DELAY_CYCLES={self.config.burst_initial_delay_cycles} \\
+    REPEAT_AFTER_DONE_CYCLES={self.config.burst_repeat_after_done_cycles} \\
+    SEQ_START_ROW={row_start} \\
+    SEQ_START_COL={col_start} \\
+]
+opt_design
+place_design
+route_design
+write_bitstream -force [file join $script_dir $bit_name]
+puts "BUILT $bit_name array-read burst start=({row_start},{col_start})"
+exit
+"""
+
+    def _ensure_saleae_burst_script(self) -> None:
+        script_path = ROOT / "api_v1/prerequisites/saleae_ubuntu/run_full_array_burst_capture.py"
+        text = script_path.read_text()
+        target = "run_full_array_burst_capture.py"
+        if self.config.saleae_host:
+            self._write_remote_saleae_text(target, text)
+            return
+        saleae_dir = Path(self.config.saleae_dir)
+        saleae_dir.mkdir(parents=True, exist_ok=True)
+        target_path = saleae_dir / target
+        if not target_path.exists() or target_path.read_text() != text:
+            target_path.write_text(text)
+
+    def _write_remote_saleae_text(self, filename: str, text: str) -> None:
+        encoded = base64.b64encode(text.encode()).decode()
+        proc = self._run_saleae(
+            f"python3 - <<'PY'\n"
+            f"import base64, pathlib\n"
+            f"pathlib.Path({filename!r}).write_bytes(base64.b64decode({encoded!r}))\n"
+            f"PY",
+            timeout_s=60,
+        )
+        if proc.returncode != 0:
+            raise RuntimeError(proc.stdout)
+
+    def _run_saleae(self, command: str, timeout_s: int | None = None) -> subprocess.CompletedProcess[str]:
+        full_command = f"cd {self.config.saleae_dir} && {command}"
+        if self.config.saleae_host:
+            return self.runner.ssh(self.config.saleae_host, full_command, timeout_s=timeout_s)
+        return self.runner.run(self._local_shell_command(full_command), timeout_s=timeout_s)
+
+    def _capture_array_burst(
+        self,
+        packet: int,
+        rails: RailVoltages,
+        bitstream: str,
+        index: int,
+        max_cells: int,
+        row_start: int,
+        col_start: int,
+    ) -> str:
+        env = {
+            "ADC_DAC_PORT": self.config.adc_dac_port,
+            "DIGITAL_SAMPLE_RATE": str(self.config.digital_sample_rate),
+            "ANALOG_SAMPLE_RATE": str(self.config.analog_sample_rate),
+            "DIGITAL_THRESHOLD_VOLTS": str(self.config.digital_threshold_volts),
+            "SHUNT_OHMS": str(self.config.shunt_ohms),
+            "RAIL_COMMAND": rails.command,
+            "VCC_SET_V": str(rails.vcc_set_v),
+            "VCC_WL_SET_V": str(rails.vcc_wl_set_v),
+            "ENABLE_ADC_MONITOR": "1" if self.config.enable_adc_monitor else "0",
+            "START_ROW": str(row_start),
+            "START_COL": str(col_start),
+            "MAX_CELLS": str(max_cells),
+            "AFTER_TRIGGER_SECONDS": str(self.config.burst_after_trigger_seconds),
+            "TRIM_DATA_SECONDS": str(self.config.burst_trim_data_seconds),
+            "STOP_ON_MISMATCH": "0",
+        }
+        env_text = " ".join(f"{k}={self._sh_quote(v)}" for k, v in env.items())
+        capture_cmd = f"env {env_text} {self.config.saleae_burst_capture_script}"
+        capture_log = self.config.run_dir / f"capture_{index}_read_array_burst.log"
+        capture_proc = self._popen_saleae(capture_cmd)
+        time.sleep(2.0)
+        program_rc = self._program_fpga(bitstream)
+        output, _ = capture_proc.communicate()
+        capture_log.write_text(output or "")
+        remote_output_dir = ""
+        for line in (output or "").splitlines():
+            if line.startswith("OUTPUT_ROOT="):
+                remote_output_dir = line.split("=", 1)[1].strip()
+            elif line.startswith("DONE output_root="):
+                remote_output_dir = line.split("output_root=", 1)[1].split()[0].strip()
+        if capture_proc.returncode != 0 or program_rc != 0 or not remote_output_dir:
+            raise RuntimeError(
+                f"burst capture/program failed capture_rc={capture_proc.returncode} "
+                f"program_rc={program_rc} remote_output_dir={remote_output_dir or '<missing>'}; see {capture_log}"
+            )
+        return remote_output_dir
+
+    def _append_burst_manifest(self, local_output_dir: Path, remote_output_dir: str, bitstream: str) -> list[dict[str, object]]:
+        burst_manifest = local_output_dir / "manifest.csv"
+        if not burst_manifest.exists():
+            raise RuntimeError(f"burst manifest missing: {burst_manifest}")
+        reads: list[dict[str, object]] = []
+        next_index = self._next_index()
+        with burst_manifest.open(newline="") as handle:
+            for offset, row in enumerate(csv.DictReader(handle)):
+                cell = CellAddress(int(row["row"]), int(row["col"]))
+                packet_text = str(row["packet"])
+                current = self._float_or_none(row.get("la_set_mean_uA"))
+                result = CellOperationResult(
+                    cell=cell,
+                    operation="read",
+                    packet=packet_text,
+                    rails=self.config.read_rails,
+                    current_uA=current,
+                    decoded_packet=str(row.get("decoded_packet", "")),
+                    ok=str(row.get("ok")) == "True",
+                    local_output_dir=str(local_output_dir),
+                    error=str(row.get("error", "")),
+                )
+                packet = int(packet_text, 16)
+                self._append_manifest(next_index + offset, "array_burst", "read", result, bitstream, bits_lsb(packet))
+                reads.append(
+                    {
+                        "cell": asdict(cell),
+                        "operation": "read",
+                        "packet": packet_text,
+                        "rails": asdict(self.config.read_rails),
+                        "current_uA": current,
+                        "decoded_packet": result.decoded_packet,
+                        "ok": result.ok,
+                        "local_output_dir": str(local_output_dir),
+                        "remote_output_dir": remote_output_dir,
+                        "error": result.error,
+                    }
+                )
+        return reads
 
     def _capture_remote(self, packet: int, rails: RailVoltages, bitstream: str, index: int, kind: str) -> str:
         env = {

@@ -170,7 +170,7 @@ function renderHeatmap(summary) {
   els.scale.textContent = Number.isFinite(min) && Number.isFinite(max) ? `${min.toFixed(1)}...${max.toFixed(1)} uA` : "--";
 }
 
-function renderChart(history) {
+function renderChart(summary) {
   const canvas = els.chart;
   const dpr = window.devicePixelRatio || 1;
   const rect = canvas.getBoundingClientRect();
@@ -182,10 +182,10 @@ function renderChart(history) {
   ctx.fillStyle = "#111318";
   ctx.fillRect(0, 0, rect.width, rect.height);
 
-  const pulses = buildPulseSeries(history || []);
+  const pulses = buildPulseSeries(summary?.history || []);
   if (!pulses.length) return;
 
-  const padLeft = 48;
+  const padLeft = 60;
   const padRight = 18;
   const padTop = 24;
   const gap = 14;
@@ -196,8 +196,9 @@ function renderChart(history) {
   const xFor = (index) => padLeft + (plotW * index) / Math.max(1, pulses.length - 1);
 
   const currentValues = pulses.map((item) => item.current).filter(Number.isFinite);
+  const thresholdValues = Object.values(summary?.thresholds_uA || {}).map(Number).filter(Number.isFinite);
   const rawMin = Math.min(...currentValues, 0);
-  const rawMax = Math.max(...currentValues, 200);
+  const rawMax = Math.max(...currentValues, ...thresholdValues, 200);
   const currentMin = Math.floor(rawMin / 25) * 25;
   const currentMax = Math.ceil(rawMax / 25) * 25;
   const currentSpan = currentMax === currentMin ? 1 : currentMax - currentMin;
@@ -208,7 +209,7 @@ function renderChart(history) {
   const yVoltage = (value) => yZero - (value / voltageMax) * (bottomH / 2 - 6);
 
   drawAxes(ctx, padLeft, padTop, plotW, topH, bottomY, bottomH, rect.width, rect.height);
-  drawThreshold(ctx, padLeft, plotW, yCurrent, pulses);
+  drawThresholds(ctx, padLeft, plotW, yCurrent, currentMin, currentMax, summary?.thresholds_uA || {});
   drawTransition(ctx, pulses, xFor, padTop, topH, bottomY, bottomH);
   drawCurrentTrace(ctx, pulses, xFor, yCurrent);
   drawVoltageBars(ctx, pulses, xFor, yZero, yVoltage);
@@ -282,20 +283,36 @@ function drawAxes(ctx, left, top, width, topH, bottomY, bottomH, totalW, totalH)
   ctx.fillText("Pulse", totalW / 2 - 12, totalH - 8);
 }
 
-function drawThreshold(ctx, left, width, yCurrent, pulses) {
-  const hasReset = pulses.some((item) => item.op === "reset");
-  const threshold = hasReset ? 100 : 150;
-  const y = yCurrent(threshold);
-  ctx.strokeStyle = "#d9dee6";
-  ctx.setLineDash([6, 5]);
-  ctx.beginPath();
-  ctx.moveTo(left, y);
-  ctx.lineTo(left + width, y);
-  ctx.stroke();
-  ctx.setLineDash([]);
-  ctx.fillStyle = "#d9dee6";
-  ctx.font = "12px system-ui";
-  ctx.fillText(`${threshold} uA`, left + 8, y - 6);
+function drawThresholds(ctx, left, width, yCurrent, currentMin, currentMax, thresholds) {
+  const visible = [
+    ["SET", Number(thresholds.set), "#ff3b4f"],
+    ["RESET", Number(thresholds.reset), "#6ab6df"],
+  ].filter(([, threshold]) => Number.isFinite(threshold));
+  const usedY = [];
+  visible.forEach(([label, threshold, color]) => {
+    if (threshold < currentMin || threshold > currentMax) return;
+    const y = yCurrent(threshold);
+    let labelY = y - 7;
+    for (const prevY of usedY) {
+      if (Math.abs(labelY - prevY) < 16) labelY = prevY + 16;
+    }
+    usedY.push(labelY);
+    ctx.strokeStyle = color;
+    ctx.setLineDash([6, 5]);
+    ctx.beginPath();
+    ctx.moveTo(left, y);
+    ctx.lineTo(left + width, y);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.font = "12px system-ui";
+    const text = `${label} ${threshold} uA`;
+    const textW = ctx.measureText(text).width;
+    const textX = left + width - textW - 8;
+    ctx.fillStyle = "rgba(17, 19, 24, 0.88)";
+    ctx.fillRect(textX - 4, labelY - 11, textW + 8, 15);
+    ctx.fillStyle = color;
+    ctx.fillText(text, textX, labelY);
+  });
 }
 
 function drawTransition(ctx, pulses, xFor, top, topH, bottomY, bottomH) {
@@ -360,10 +377,10 @@ function drawLabels(ctx, pulses, currentMin, currentMax, voltageMax, left, top, 
   ctx.fillText(cell ? `Cell (${cell.row},${cell.col})` : "Cell", left, 16);
   ctx.font = "12px system-ui";
   ctx.fillStyle = "#9aa4af";
-  ctx.fillText(String(currentMax), 8, top + 5);
-  ctx.fillText(String(currentMin), 8, top + topH);
-  ctx.fillText(`+${voltageMax.toFixed(1)}`, 8, bottomY + 10);
-  ctx.fillText(`-${voltageMax.toFixed(1)}`, 8, totalH - 30);
+  ctx.fillText(`${currentMax} uA`, 4, top + 5);
+  ctx.fillText(`${currentMin} uA`, 4, top + topH - 4);
+  ctx.fillText(`+${voltageMax.toFixed(1)} V`, 4, bottomY + 10);
+  ctx.fillText(`-${voltageMax.toFixed(1)} V`, 4, totalH - 30);
   ctx.fillStyle = "#ff3b4f";
   ctx.fillRect(left + 250, totalH - 42, 28, 5);
   ctx.fillText("SET", left + 286, totalH - 36);
@@ -382,7 +399,7 @@ async function refresh() {
   els.commandNote.textContent = state.commandsEnabled ? "Enabled" : "--allow-commands";
   renderMetrics(data.state);
   renderHeatmap(data.state);
-  renderChart(data.state?.history || []);
+  renderChart(data.state);
 }
 
 els.runSelect.addEventListener("change", () => {

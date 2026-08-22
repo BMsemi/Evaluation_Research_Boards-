@@ -22,6 +22,16 @@ RUNS_DIR = ROOT / "api_v1" / "runs"
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 GRID_SIZE = 32
 
+try:
+    from api_v1.cell_api import ScanDebugConfig
+
+    DEFAULT_THRESHOLDS_UA = {
+        "set": ScanDebugConfig().set_sweep.threshold_uA,
+        "reset": ScanDebugConfig().reset_sweep.threshold_uA,
+    }
+except Exception:
+    DEFAULT_THRESHOLDS_UA = {"set": 150.0, "reset": 130.0}
+
 
 @dataclass(frozen=True)
 class ViewerConfig:
@@ -157,6 +167,27 @@ def _active_error(run_dir: Path, rows: list[dict[str, Any]], log_events: list[di
     return last_log_error
 
 
+def _read_thresholds(run_dir: Path) -> dict[str, float]:
+    thresholds = dict(DEFAULT_THRESHOLDS_UA)
+    operations_path = run_dir / "cell_operations.jsonl"
+    try:
+        lines = operations_path.read_text().splitlines()
+    except OSError:
+        return thresholds
+    for line in lines:
+        try:
+            item = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        operation = item.get("operation")
+        steps = item.get("steps") or []
+        for step in steps:
+            threshold = _float_or_none(str(step.get("threshold_uA")) if step.get("threshold_uA") is not None else None)
+            if operation in thresholds and threshold is not None:
+                thresholds[operation] = threshold
+    return thresholds
+
+
 def _run_choices(runs_dir: Path) -> list[dict[str, Any]]:
     choices = []
     for manifest in sorted(runs_dir.glob("*/manifest.csv"), key=lambda path: _run_updated_at(path.parent), reverse=True):
@@ -183,6 +214,7 @@ def _is_read_row(row: dict[str, Any]) -> bool:
 def _summarize(run_dir: Path, rows: list[dict[str, Any]]) -> dict[str, Any]:
     log_events = _recent_log_events(run_dir)
     active_error = _active_error(run_dir, rows, log_events)
+    thresholds = _read_thresholds(run_dir)
     latest_read_by_cell: dict[str, dict[str, Any]] = {}
     reads: list[dict[str, Any]] = []
     programs: list[dict[str, Any]] = []
@@ -244,6 +276,7 @@ def _summarize(run_dir: Path, rows: list[dict[str, Any]]) -> dict[str, Any]:
             "ok": sum(1 for row in rows if row.get("ok")),
         },
         "scale": {"min_uA": min_current, "max_uA": max_current},
+        "thresholds_uA": thresholds,
         "cells": list(latest_read_by_cell.values()),
         "history": rows[-160:],
         "readHistory": reads[-160:],

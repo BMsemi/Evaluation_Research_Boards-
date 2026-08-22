@@ -200,7 +200,7 @@ function renderChart(summary) {
   const pulses = buildPulseSeries(summary?.history || []);
   if (!pulses.length) return;
 
-  const padLeft = 60;
+  const padLeft = 72;
   const padRight = 18;
   const padTop = 24;
   const gap = 14;
@@ -233,7 +233,7 @@ function renderChart(summary) {
   drawCurrentTrace(ctx, pulses, xFor, yCurrent);
   drawVoltageBars(ctx, pulses, xFor, yZero, yVoltage);
   drawActiveVoltageBadge(ctx, summary?.last, padLeft, plotW, bottomY);
-  drawLabels(ctx, pulses, currentMin, currentMax, voltageMax, padLeft, padTop, topH, bottomY, rect.height);
+  drawLabels(ctx, pulses, currentMin, currentMax, voltageMax, padLeft, padTop, topH, bottomY, bottomH, rect.height);
 }
 
 function isRead(row) {
@@ -432,17 +432,20 @@ function drawActiveVoltageBadge(ctx, row, left, width, bottomY) {
   ctx.fillText(text, x, y);
 }
 
-function drawLabels(ctx, pulses, currentMin, currentMax, voltageMax, left, top, topH, bottomY, totalH) {
+function drawLabels(ctx, pulses, currentMin, currentMax, voltageMax, left, top, topH, bottomY, bottomH, totalH) {
   const cell = pulses.find((item) => item.cell)?.cell;
   ctx.fillStyle = "#f3f5f7";
   ctx.font = "600 13px system-ui";
   ctx.fillText(cell ? `Cell (${cell.row},${cell.col})` : "Cell", left, 16);
   ctx.font = "12px system-ui";
   ctx.fillStyle = "#9aa4af";
-  ctx.fillText(`${currentMax} uA`, 4, top + 5);
-  ctx.fillText(`${currentMin} uA`, 4, top + topH - 4);
-  ctx.fillText(`+${voltageMax.toFixed(1)} V`, 4, bottomY + 10);
-  ctx.fillText(`-${voltageMax.toFixed(1)} V`, 4, totalH - 30);
+  ctx.textAlign = "right";
+  ctx.fillText(`${currentMax} uA`, left - 8, top + 5);
+  ctx.fillText(`${currentMin} uA`, left - 8, top + topH - 4);
+  ctx.fillText(`+${voltageMax.toFixed(1)}V`, left - 8, bottomY + 11);
+  ctx.fillText("0V", left - 8, bottomY + bottomH / 2 + 4);
+  ctx.fillText(`-${voltageMax.toFixed(1)}V`, left - 8, bottomY + bottomH - 4);
+  ctx.textAlign = "left";
   ctx.fillStyle = "#ff3b4f";
   ctx.fillRect(left + 250, totalH - 42, 28, 5);
   ctx.fillText("SET", left + 286, totalH - 36);

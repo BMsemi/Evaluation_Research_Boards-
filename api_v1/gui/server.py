@@ -32,7 +32,7 @@ try:
         "reset": ScanDebugConfig().reset_sweep.threshold_uA,
     }
 except Exception:
-    DEFAULT_THRESHOLDS_UA = {"set": 200.0, "reset": 130.0}
+    DEFAULT_THRESHOLDS_UA = {"set": 166.7, "reset": 108.3}
 
 
 @dataclass(frozen=True)

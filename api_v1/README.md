@@ -330,6 +330,8 @@ FPGA files copied into this API folder:
 - [prerequisites/fpga_zynq7020/caravel_scan_debug_fpga.v](./prerequisites/fpga_zynq7020/caravel_scan_debug_fpga.v)
 - [prerequisites/fpga_zynq7020/caravel_scan_debug_fpga.xdc](./prerequisites/fpga_zynq7020/caravel_scan_debug_fpga.xdc)
 - [prerequisites/fpga_zynq7020/program_scan_debug_zynq7020.tcl](./prerequisites/fpga_zynq7020/program_scan_debug_zynq7020.tcl)
+- [prerequisites/fpga_zynq7020/program_prebuilt_bitstream.tcl](./prerequisites/fpga_zynq7020/program_prebuilt_bitstream.tcl)
+- [prerequisites/fpga_zynq7020/bitstreams](./prerequisites/fpga_zynq7020/bitstreams) contains backed-up `.bit` files for reboot recovery.
 
 Teensy DAC/ADC firmware copied into this API folder:
 

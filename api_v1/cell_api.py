@@ -109,7 +109,7 @@ class ScanDebugConfig:
     read_rails: RailVoltages = field(default_factory=lambda: RailVoltages(1.2, 2.5))
     set_sweep: SweepConfig = field(
         default_factory=lambda: SweepConfig.from_ranges(
-            vcc_set_v=(2.0, 2.3, 2.4, 2.5),
+            vcc_set_v=(2.0, 2.3, 2.4, 2.5, 2.8),
             vcc_wl_set_v=(0.5, 0.8, 1.1, 1.4, 1.7, 2.0),
             threshold_uA=150.0,
             direction="above",

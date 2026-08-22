@@ -4,6 +4,8 @@ This repo contains the scan-debug API, FPGA/Saleae setup files, and a local real
 
 The main API documentation is in [`api_v1/README.md`](api_v1/README.md). This top-level guide explains the GUI shown at `http://127.0.0.1:8765`.
 
+![Debug Monitor GUI](docs/images/gui-debug-monitor.png)
+
 ## Start The GUI
 
 View-only monitor:

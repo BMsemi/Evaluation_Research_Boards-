@@ -265,8 +265,9 @@ dt {
 }
 
 .command-form h2,
+.command-form .password-field,
 .command-form .checkbox,
-.command-form button,
+.command-form .command-buttons,
 .command-form p {
   grid-column: 1 / -1;
 }
@@ -286,6 +287,22 @@ dt {
 
 .checkbox input {
   min-height: auto;
+}
+
+.command-buttons {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.kill-btn {
+  background: #5b2428;
+  border-color: #9a3a42;
+}
+
+.kill-btn:disabled {
+  background: #242832;
+  border-color: var(--line);
 }
 
 .api-return {

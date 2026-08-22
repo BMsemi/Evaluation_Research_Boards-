@@ -6,6 +6,7 @@ import csv
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import time
@@ -145,6 +146,11 @@ def _log_event_order(path: Path) -> float:
 
 def _extract_error_message(text: str) -> str:
     lines = [line.strip() for line in text.splitlines() if line.strip()]
+    priority = ("permission denied", "readtimeout", "deviceerror", "runtimeerror", "traceback", "exception", "error")
+    for keyword in priority:
+        for line in reversed(lines):
+            if keyword in line.lower():
+                return line[-220:]
     for line in reversed(lines):
         if "error" in line.lower() or "traceback" in line.lower() or "exception" in line.lower():
             return line[-220:]
@@ -287,7 +293,7 @@ def _summarize(run_dir: Path, rows: list[dict[str, Any]]) -> dict[str, Any]:
 
 class GuiHandler(SimpleHTTPRequestHandler):
     config: ViewerConfig
-    running_commands: dict[str, subprocess.Popen[str]] = {}
+    running_commands: dict[str, dict[str, Any]] = {}
 
     def __init__(self, *args: Any, **kwargs: Any):
         super().__init__(*args, directory=str(STATIC_DIR), **kwargs)
@@ -320,7 +326,11 @@ class GuiHandler(SimpleHTTPRequestHandler):
         super().do_GET()
 
     def do_POST(self) -> None:
-        if urlparse(self.path).path != "/api/command":
+        parsed_path = urlparse(self.path).path
+        if parsed_path == "/api/command/kill":
+            self._kill_command()
+            return
+        if parsed_path != "/api/command":
             self.send_error(HTTPStatus.NOT_FOUND)
             return
         if not self.config.allow_commands:
@@ -331,27 +341,87 @@ class GuiHandler(SimpleHTTPRequestHandler):
         operation = str(payload.get("operation", "read"))
         row = int(payload.get("row", 0))
         col = int(payload.get("col", 0))
+        zynq_password = str(payload.get("zynqPassword", ""))
         dry_run = bool(payload.get("dryRun", False))
+        confirmed = bool(payload.get("confirmHardware", False))
         if operation not in {"read", "set", "reset", "cycle"} or not (0 <= row < GRID_SIZE and 0 <= col < GRID_SIZE):
             self._send_json({"error": "Invalid operation or cell."}, HTTPStatus.BAD_REQUEST)
             return
+        if not dry_run and not confirmed:
+            self._send_json({"error": "Hardware command needs explicit confirmation."}, HTTPStatus.BAD_REQUEST)
+            return
+        if any(state["proc"].poll() is None for state in self.running_commands.values()):
+            self._send_json({"error": "A GUI command is already processing."}, HTTPStatus.CONFLICT)
+            return
         run_dir = ROOT / "api_v1" / "runs" / f"gui_{time.strftime('%Y%m%d_%H%M%S')}_r{row:02d}c{col:02d}_{operation}"
+        run_dir.mkdir(parents=True, exist_ok=True)
         cmd = [sys.executable, str(ROOT / "api_v1" / "scan_debug_cli.py"), operation, "--row", str(row), "--col", str(col), "--run-dir", str(run_dir)]
+        safe_cmd = list(cmd)
+        if zynq_password:
+            cmd.extend(["--zynq-password", zynq_password])
+            safe_cmd.extend(["--zynq-password", "<redacted>"])
         if dry_run:
             cmd.append("--dry-run")
-        proc = subprocess.Popen(cmd, cwd=str(ROOT), text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            safe_cmd.append("--dry-run")
+        log_path = run_dir / "gui_command.log"
+        log_handle = log_path.open("w")
+        proc = subprocess.Popen(cmd, cwd=str(ROOT), text=True, stdout=log_handle, stderr=subprocess.STDOUT, start_new_session=True)
         key = f"{int(time.time() * 1000)}"
-        self.running_commands[key] = proc
-        self._send_json({"id": key, "runDir": str(run_dir.relative_to(ROOT)), "command": cmd})
+        self.running_commands[key] = {
+            "proc": proc,
+            "operation": operation,
+            "row": row,
+            "col": col,
+            "runDir": str(run_dir.relative_to(ROOT)),
+            "logPath": str(log_path.relative_to(ROOT)),
+            "started": time.time(),
+            "logHandle": log_handle,
+        }
+        self._send_json({"id": key, "runDir": str(run_dir.relative_to(ROOT)), "command": safe_cmd})
 
     def _command_state(self) -> list[dict[str, Any]]:
         states = []
-        for key, proc in list(self.running_commands.items()):
+        for key, item in list(self.running_commands.items()):
+            proc = item["proc"]
             return_code = proc.poll()
-            states.append({"id": key, "pid": proc.pid, "running": return_code is None, "returnCode": return_code})
+            states.append(
+                {
+                    "id": key,
+                    "pid": proc.pid,
+                    "running": return_code is None,
+                    "returnCode": return_code,
+                    "operation": item.get("operation"),
+                    "row": item.get("row"),
+                    "col": item.get("col"),
+                    "runDir": item.get("runDir"),
+                    "started": item.get("started"),
+                }
+            )
             if return_code is not None:
+                log_handle = item.get("logHandle")
+                if log_handle:
+                    log_handle.close()
                 self.running_commands.pop(key, None)
         return states
+
+    def _kill_command(self) -> None:
+        length = int(self.headers.get("Content-Length", "0"))
+        payload = json.loads(self.rfile.read(length) or b"{}")
+        command_id = str(payload.get("id", ""))
+        item = self.running_commands.get(command_id)
+        if not item:
+            self._send_json({"error": "No matching GUI command is running."}, HTTPStatus.NOT_FOUND)
+            return
+        proc = item["proc"]
+        if proc.poll() is not None:
+            self._send_json({"error": "Command already finished."}, HTTPStatus.CONFLICT)
+            return
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+        except OSError:
+            proc.terminate()
+        item["killed"] = time.time()
+        self._send_json({"ok": True, "id": command_id, "message": "Kill signal sent."})
 
     def _send_json(self, item: Any, status: HTTPStatus = HTTPStatus.OK) -> None:
         body = json.dumps(item, indent=2).encode()

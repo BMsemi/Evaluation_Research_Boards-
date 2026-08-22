@@ -25,8 +25,10 @@ const els = {
   operationInput: document.getElementById("operationInput"),
   rowInput: document.getElementById("rowInput"),
   colInput: document.getElementById("colInput"),
+  zynqPasswordInput: document.getElementById("zynqPasswordInput"),
   dryRunInput: document.getElementById("dryRunInput"),
   commandBtn: document.getElementById("commandBtn"),
+  killBtn: document.getElementById("killBtn"),
   commandNote: document.getElementById("commandNote"),
 };
 
@@ -395,11 +397,24 @@ async function refresh() {
   const data = await response.json();
   renderRuns(data.runs || [], data.state?.run?.id || "");
   state.commandsEnabled = Boolean(data.commandsEnabled);
-  els.commandBtn.disabled = !state.commandsEnabled;
-  els.commandNote.textContent = state.commandsEnabled ? "Enabled" : "--allow-commands";
+  renderCommandState(data.runningCommands || []);
   renderMetrics(data.state);
   renderHeatmap(data.state);
   renderChart(data.state);
+}
+
+function renderCommandState(commands) {
+  const running = commands.find((command) => command.running);
+  state.runningCommandId = running?.id || "";
+  els.commandBtn.disabled = !state.commandsEnabled || Boolean(running);
+  els.killBtn.disabled = !running;
+  if (!state.commandsEnabled) {
+    els.commandNote.textContent = "--allow-commands";
+  } else if (running) {
+    els.commandNote.textContent = `Processing ${running.operation} r${running.row} c${running.col}`;
+  } else {
+    els.commandNote.textContent = "Ready";
+  }
 }
 
 els.runSelect.addEventListener("change", () => {
@@ -414,14 +429,39 @@ els.followBtn.addEventListener("click", () => {
   refresh();
 });
 els.refreshBtn.addEventListener("click", refresh);
+els.killBtn.addEventListener("click", async () => {
+  if (!state.runningCommandId) return;
+  const ok = window.confirm("Kill the GUI-started command that is processing now?");
+  if (!ok) return;
+  const response = await fetch("/api/command/kill", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ id: state.runningCommandId }),
+  });
+  const data = await response.json();
+  els.commandNote.textContent = data.error || data.message || "Kill signal sent";
+  setTimeout(refresh, 500);
+});
 els.commandForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   const payload = {
     operation: els.operationInput.value,
     row: Number(els.rowInput.value),
     col: Number(els.colInput.value),
+    zynqPassword: els.zynqPasswordInput.value,
     dryRun: els.dryRunInput.checked,
   };
+  if (!payload.dryRun) {
+    const ok = window.confirm(
+      `Send ${payload.operation.toUpperCase()} to hardware for row ${payload.row}, col ${payload.col}?\n\n` +
+      "This will run the API against the connected bench."
+    );
+    if (!ok) {
+      els.commandNote.textContent = "Cancelled";
+      return;
+    }
+    payload.confirmHardware = true;
+  }
   const response = await fetch("/api/command", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -429,6 +469,7 @@ els.commandForm.addEventListener("submit", async (event) => {
   });
   const data = await response.json();
   els.commandNote.textContent = data.error || `Started ${payload.operation} in ${data.runDir}`;
+  if (!data.error) state.runningCommandId = data.id;
   setTimeout(refresh, 900);
 });
 

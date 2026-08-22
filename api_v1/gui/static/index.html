@@ -63,8 +63,12 @@
             </label>
             <label>Row <input id="rowInput" type="number" min="0" max="31" value="0"></label>
             <label>Col <input id="colInput" type="number" min="0" max="31" value="0"></label>
+            <label class="password-field">Zynq PW <input id="zynqPasswordInput" type="password" autocomplete="off"></label>
             <label class="checkbox"><input id="dryRunInput" type="checkbox" checked> Dry run</label>
-            <button id="commandBtn" type="submit">Start</button>
+            <div class="command-buttons">
+              <button id="commandBtn" type="submit">Start</button>
+              <button id="killBtn" class="kill-btn" type="button" disabled>Kill</button>
+            </div>
             <p id="commandNote">Start server with --allow-commands to enable.</p>
           </form>
 

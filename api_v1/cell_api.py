@@ -136,8 +136,8 @@ class ScanDebugConfig:
     )
     reset_sweep: SweepConfig = field(
         default_factory=lambda: SweepConfig.from_ranges(
-            vcc_set_v=(3.0, 3.1, 3.2, 3.3, 3.4, 3.5),
-            vcc_wl_set_v=(0.5, 0.7, 0.9, 1.1, 1.3, 1.5, 1.7, 1.9, 2.0),
+            vcc_set_v=(3.3, 3.4, 3.5, 3.6, 3.7),
+            vcc_wl_set_v=(1.0, 1.2, 1.4, 1.6, 1.8, 2.0, 2.2, 2.3),
             threshold_uA=130.0,
             direction="below",
         )
@@ -975,6 +975,14 @@ exit
         ]
         if saleae_errors:
             return saleae_errors[0][:220]
+        bad_decodes = [row for row in rows if str(row.get("ok", "")).lower() != "true"]
+        if bad_decodes:
+            sample = bad_decodes[0]
+            return (
+                f"burst manifest has {len(bad_decodes)} decode mismatches; "
+                f"sample row={sample.get('row')} col={sample.get('col')} "
+                f"packet={sample.get('packet')} decoded={sample.get('decoded_packet')}"
+            )
         return ""
 
     def _capture_remote(self, packet: int, rails: RailVoltages, bitstream: str, index: int, kind: str) -> str:

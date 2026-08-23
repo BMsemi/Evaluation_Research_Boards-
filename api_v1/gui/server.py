@@ -244,12 +244,15 @@ def _parse_scan_debug_process(command: str) -> dict[str, Any]:
 
     row = _int_or_none(flag_value("--row"))
     col = _int_or_none(flag_value("--col"))
+    col_start = _int_or_none(flag_value("--col-start"))
     run_dir = flag_value("--run-dir")
     out: dict[str, Any] = {"operation": operation}
     if row is not None:
         out["row"] = row
     if col is not None:
         out["col"] = col
+    if col_start is not None:
+        out["colStart"] = col_start
     if run_dir:
         try:
             out["runDir"] = str(Path(run_dir).resolve().relative_to(ROOT))
@@ -330,20 +333,21 @@ def _array_resume_info(run_dir: Path, rows: list[dict[str, Any]]) -> dict[str, A
 
 
 def _latest_array_heatmap_cells(run_dir: Path) -> dict[str, dict[str, Any]]:
-    for manifest in sorted(run_dir.parent.glob("*/manifest.csv"), key=lambda path: _run_updated_at(path.parent), reverse=True):
+    latest_by_cell: dict[str, dict[str, Any]] = {}
+    for manifest in sorted(run_dir.parent.glob("*/manifest.csv"), key=lambda path: _run_updated_at(path.parent)):
         if manifest.parent == run_dir:
             continue
         rows = _read_manifest(manifest)
         if not _array_resume_info(manifest.parent, rows).get("isArrayRun"):
             continue
-        latest_by_cell: dict[str, dict[str, Any]] = {}
         for row in rows:
             cell = row.get("cellAddress")
-            if cell and _is_read_row(row):
-                latest_by_cell[_cell_key(cell)] = row
-        if latest_by_cell:
-            return latest_by_cell
-    return {}
+            if not cell or not _is_read_row(row) or row.get("current_uA") is None:
+                continue
+            key = _cell_key(cell)
+            if key not in latest_by_cell or row.get("ok"):
+                latest_by_cell[key] = row
+    return latest_by_cell
 
 
 def _latest_single_cell_heatmap_cells(run_dir: Path) -> dict[str, dict[str, Any]]:
@@ -388,6 +392,7 @@ def _summarize(run_dir: Path, rows: list[dict[str, Any]]) -> dict[str, Any]:
     progress_events = _read_progress_events(run_dir)
     active_error = _active_error(run_dir, rows, log_events)
     thresholds = _read_thresholds(run_dir)
+    is_array_run = _array_resume_info(run_dir, rows).get("isArrayRun")
     latest_read_by_cell: dict[str, dict[str, Any]] = {}
     reads: list[dict[str, Any]] = []
     programs: list[dict[str, Any]] = []
@@ -397,7 +402,8 @@ def _summarize(run_dir: Path, rows: list[dict[str, Any]]) -> dict[str, Any]:
             continue
         if _is_read_row(row):
             reads.append(row)
-            latest_read_by_cell[_cell_key(cell)] = row
+            if row.get("ok") or not is_array_run:
+                latest_read_by_cell[_cell_key(cell)] = row
         else:
             programs.append(row)
 
@@ -427,11 +433,9 @@ def _summarize(run_dir: Path, rows: list[dict[str, Any]]) -> dict[str, Any]:
     values = [row["current_uA"] for row in latest_read_by_cell.values() if row.get("current_uA") is not None]
     min_current = min(values) if values else None
     max_current = max(values) if values else None
-    heatmap_cells = dict(latest_read_by_cell)
-    if not _array_resume_info(run_dir, rows).get("isArrayRun"):
-        heatmap_cells = _latest_array_heatmap_cells(run_dir)
-        heatmap_cells.update(_latest_single_cell_heatmap_cells(run_dir))
-        heatmap_cells.update(latest_read_by_cell)
+    heatmap_cells = _latest_array_heatmap_cells(run_dir)
+    heatmap_cells.update(_latest_single_cell_heatmap_cells(run_dir))
+    heatmap_cells.update(latest_read_by_cell)
     history = _combined_cell_history(run_dir, rows, last_cell)
     read_history = [row for row in history if _is_read_row(row)]
 
@@ -567,6 +571,8 @@ class GuiHandler(SimpleHTTPRequestHandler):
             cmd.extend(["--array-mode", array_mode])
             if resume_info:
                 cmd.extend(["--col-start", str(resume_col)])
+            else:
+                cmd.extend(["--col-start", str(col)])
         safe_cmd = list(cmd)
         if zynq_password:
             cmd.extend(["--zynq-password", zynq_password])

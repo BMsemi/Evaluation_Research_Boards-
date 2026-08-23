@@ -571,7 +571,9 @@ function renderCommandState(commands) {
     }
     if (Number.isFinite(running.row)) els.rowInput.value = running.row;
     if (Number.isFinite(running.col)) els.colInput.value = running.col;
-    const target = running.operation === "read-array" ? "32x32 array" :
+    const target = running.operation === "read-array"
+      ? `array from col ${running.colStart ?? running.col ?? 0}`
+      :
       Number.isFinite(running.row) ? `r${running.row} c${running.col ?? 0}` : "API";
     const source = running.external ? "external " : "";
     els.commandNote.textContent = `Processing ${source}${running.operation} ${target}`;
@@ -678,8 +680,8 @@ els.commandForm.addEventListener("submit", async (event) => {
     zynqPassword: els.zynqPasswordInput.value,
     dryRun: els.dryRunInput.checked,
   };
-  const target = payload.operation === "read-array" ? "the full 32x32 array" : `row ${payload.row}, col ${payload.col}`;
-  const extra = payload.operation === "read-array" ? "\n\nThis will read 1024 cells and may take a long time." : "";
+  const target = payload.operation === "read-array" ? `the array starting at column ${payload.col}` : `row ${payload.row}, col ${payload.col}`;
+  const extra = payload.operation === "read-array" ? "\n\nThis will read columns from the selected start column through column 31." : "";
   await sendCommand(payload, target, extra);
 });
 

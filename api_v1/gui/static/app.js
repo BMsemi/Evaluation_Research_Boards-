@@ -7,7 +7,7 @@ const state = {
   currentMax_uA: 335,
 };
 
-const CURRENT_DISPLAY_SCALE = 1 / 1.2;
+const CURRENT_DISPLAY_SCALE = 1;
 
 const els = {
   runSelect: document.getElementById("runSelect"),
@@ -163,7 +163,13 @@ function renderTicker(summary) {
   const history = summary?.history || [];
   const logEvents = summary?.logEvents || [];
   const progressEvents = summary?.progressEvents || [];
-  const rows = [...history, ...logEvents, ...progressEvents]
+  const running = (state.lastCommands || []).find((command) => command.running);
+  const rows = [
+    ...history,
+    ...logEvents,
+    ...progressEvents,
+    ...(running ? [activeCommandEvent(running, summary)] : []),
+  ]
     .sort((a, b) => eventOrder(a) - eventOrder(b))
     .slice(-2)
     .reverse()
@@ -177,6 +183,29 @@ function renderTicker(summary) {
     line.textContent = text;
     els.tickerText.appendChild(line);
   }
+}
+
+function activeCommandEvent(command, summary) {
+  const last = summary?.last;
+  const cell = Number.isFinite(command.row) ? { row: command.row, col: command.col ?? 0 } : last?.cellAddress;
+  const pulse = latestPulseForOperation(summary?.history || [], command.operation);
+  return {
+    source: "active-command",
+    operation: command.operation || "api",
+    cellAddress: cell,
+    vcc_set_V: pulse?.vcc_set_V ?? command.activeVccSet_V,
+    vcc_wl_set_V: pulse?.vcc_wl_set_V ?? command.activeVccWlSet_V,
+    eventOrder: Number.MAX_SAFE_INTEGER,
+  };
+}
+
+function latestPulseForOperation(history, operation) {
+  if (!(operation === "set" || operation === "reset")) return null;
+  for (let index = history.length - 1; index >= 0; index -= 1) {
+    const row = history[index];
+    if (row?.operation === operation && !isRead(row)) return row;
+  }
+  return null;
 }
 
 function eventOrder(row) {
@@ -199,6 +228,14 @@ function formatApiEvent(row) {
         ? ` (${row.cells})`
         : "";
     return `${String(row.operation || "API").toUpperCase()}: ${formatApiMessage(row.message)}${count}`;
+  }
+  if (row.source === "active-command") {
+    const cell = formatCell(row.cellAddress);
+    const op = String(row.operation || "API").toUpperCase();
+    const rails = Number.isFinite(row.vcc_set_V) && Number.isFinite(row.vcc_wl_set_V)
+      ? `Vcc ${row.vcc_set_V} V / WL ${row.vcc_wl_set_V} V`
+      : "voltage pending";
+    return `${op} running at ${cell}: ${rails}`;
   }
   const cell = formatCell(row.cellAddress);
   const packet = row.packet ? `packet ${row.packet}` : "packet unknown";

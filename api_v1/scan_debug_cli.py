@@ -85,7 +85,7 @@ def main() -> int:
     parser.add_argument("--read-vcc-wl-set", type=float, default=2.5)
     parser.add_argument("--set-vcc-set", default="1.6,2.0,2.3,2.4,2.5,2.8")
     parser.add_argument("--set-vcc-wl-set", default="0.5,0.7,0.9,1.1,1.3,1.5,1.7,1.9,2.0")
-    parser.add_argument("--reset-vcc-set", default="2.0,2.3,2.6,2.9,3.2,3.5")
+    parser.add_argument("--reset-vcc-set", default="3.5")
     parser.add_argument("--reset-vcc-wl-set", default="0.5,0.7,0.9,1.1,1.3,1.5,1.7,1.9,2.0")
     parser.add_argument("--set-threshold", type=float, default=200.0)
     parser.add_argument("--reset-threshold", type=float, default=130.0)

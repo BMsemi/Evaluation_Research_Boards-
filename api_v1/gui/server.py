@@ -182,6 +182,8 @@ def _extract_error_message(text: str) -> str:
             continue
         if line.startswith('{"progress":'):
             continue
+        if re.fullmatch(r'"error"\s*:\s*""[,]?', line):
+            continue
         lines.append(line)
     priority = ("permission denied", "readtimeout", "deviceerror", "runtimeerror", "traceback", "exception", "error")
     for keyword in priority:
@@ -256,6 +258,29 @@ def _parse_scan_debug_process(command: str) -> dict[str, Any]:
     return out
 
 
+def _active_capture_rails(parent_pid: int) -> dict[str, float]:
+    try:
+        proc = subprocess.run(["ps", "-axo", "pid,ppid,command"], text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    except OSError:
+        return {}
+    for line in proc.stdout.splitlines():
+        parts = line.strip().split(maxsplit=2)
+        if len(parts) != 3:
+            continue
+        pid = _int_or_none(parts[0])
+        ppid = _int_or_none(parts[1])
+        command = parts[2]
+        if pid is None or ppid != parent_pid or "SCAN_CUSTOM_RAILS" not in command:
+            continue
+        match = re.search(r"SCAN_CUSTOM_RAILS\s+(\d+(?:\.\d+)?)\s+(\d+(?:\.\d+)?)", command)
+        if match:
+            return {
+                "activeVccSet_V": float(match.group(1)) / 1000,
+                "activeVccWlSet_V": float(match.group(2)) / 1000,
+            }
+    return {}
+
+
 def _run_choices(runs_dir: Path) -> list[dict[str, Any]]:
     choices = []
     for manifest in sorted(runs_dir.glob("*/manifest.csv"), key=lambda path: _run_updated_at(path.parent), reverse=True):
@@ -321,6 +346,40 @@ def _latest_array_heatmap_cells(run_dir: Path) -> dict[str, dict[str, Any]]:
     return {}
 
 
+def _latest_single_cell_heatmap_cells(run_dir: Path) -> dict[str, dict[str, Any]]:
+    latest_by_cell: dict[str, dict[str, Any]] = {}
+    for manifest in sorted(run_dir.parent.glob("*/manifest.csv"), key=lambda path: _run_updated_at(path.parent)):
+        rows = _read_manifest(manifest)
+        if _array_resume_info(manifest.parent, rows).get("isArrayRun"):
+            continue
+        for row in rows:
+            cell = row.get("cellAddress")
+            if cell and _is_read_row(row) and row.get("current_uA") is not None:
+                latest_by_cell[_cell_key(cell)] = row
+    return latest_by_cell
+
+
+def _combined_cell_history(run_dir: Path, rows: list[dict[str, Any]], last_cell: dict[str, int] | None) -> list[dict[str, Any]]:
+    if not last_cell or _array_resume_info(run_dir, rows).get("isArrayRun"):
+        return rows[-160:]
+    target_key = _cell_key(last_cell)
+    combined: list[dict[str, Any]] = []
+    for manifest in sorted(run_dir.parent.glob("*/manifest.csv"), key=lambda path: _run_updated_at(path.parent)):
+        candidate_dir = manifest.parent
+        if candidate_dir == run_dir:
+            continue
+        candidate_rows = _read_manifest(manifest)
+        if _array_resume_info(candidate_dir, candidate_rows).get("isArrayRun"):
+            continue
+        combined.extend(
+            row
+            for row in candidate_rows
+            if row.get("cellAddress") and _cell_key(row["cellAddress"]) == target_key
+        )
+    combined.extend(rows)
+    return combined[-160:]
+
+
 def _summarize(run_dir: Path, rows: list[dict[str, Any]]) -> dict[str, Any]:
     log_events = _recent_log_events(run_dir)
     progress_events = _read_progress_events(run_dir)
@@ -368,7 +427,10 @@ def _summarize(run_dir: Path, rows: list[dict[str, Any]]) -> dict[str, Any]:
     heatmap_cells = dict(latest_read_by_cell)
     if not _array_resume_info(run_dir, rows).get("isArrayRun"):
         heatmap_cells = _latest_array_heatmap_cells(run_dir)
+        heatmap_cells.update(_latest_single_cell_heatmap_cells(run_dir))
         heatmap_cells.update(latest_read_by_cell)
+    history = _combined_cell_history(run_dir, rows, last_cell)
+    read_history = [row for row in history if _is_read_row(row)]
 
     return {
         "run": {
@@ -393,8 +455,8 @@ def _summarize(run_dir: Path, rows: list[dict[str, Any]]) -> dict[str, Any]:
         "scale": {"min_uA": min_current, "max_uA": max_current},
         "thresholds_uA": thresholds,
         "cells": list(heatmap_cells.values()),
-        "history": rows[-160:],
-        "readHistory": reads[-160:],
+        "history": history,
+        "readHistory": read_history[-160:],
         "logEvents": log_events,
         "progressEvents": progress_events,
         "activeError": active_error,
@@ -555,6 +617,7 @@ class GuiHandler(SimpleHTTPRequestHandler):
                     "col": item.get("col"),
                     "runDir": item.get("runDir"),
                     "started": item.get("started"),
+                    **_active_capture_rails(proc.pid),
                 }
             )
             if return_code is not None:
@@ -589,6 +652,7 @@ class GuiHandler(SimpleHTTPRequestHandler):
                     "external": True,
                     "returnCode": None,
                     **parsed,
+                    **_active_capture_rails(pid),
                 }
             )
         return states

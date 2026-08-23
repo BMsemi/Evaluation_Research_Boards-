@@ -344,7 +344,7 @@ Hardware-backed set sweep:
 python api_v1/scan_debug_cli.py set --row 5 --col 0 \
   --set-vcc-set 1.6,2.0,2.3,2.4,2.5,2.8 \
   --set-vcc-wl-set 0.5,0.7,0.9,1.1,1.3,1.5,1.7,1.9,2.0 \
-  --set-threshold 166.7
+  --set-threshold 200.0
 ```
 
 Hardware-backed reset sweep:
@@ -353,7 +353,7 @@ Hardware-backed reset sweep:
 python api_v1/scan_debug_cli.py reset --row 5 --col 0 \
   --reset-vcc-set 2.0,2.3,2.6,2.9,3.2,3.5 \
   --reset-vcc-wl-set 0.5,0.7,0.9,1.1,1.3,1.5,1.7,1.9,2.0 \
-  --reset-threshold 108.3
+  --reset-threshold 130.0
 ```
 
 Default 32 by 32 array read:

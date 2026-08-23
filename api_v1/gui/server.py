@@ -32,7 +32,7 @@ try:
         "reset": ScanDebugConfig().reset_sweep.threshold_uA,
     }
 except Exception:
-    DEFAULT_THRESHOLDS_UA = {"set": 166.7, "reset": 108.3}
+    DEFAULT_THRESHOLDS_UA = {"set": 200.0, "reset": 130.0}
 
 
 @dataclass(frozen=True)
@@ -223,24 +223,7 @@ def _active_error(run_dir: Path, rows: list[dict[str, Any]], log_events: list[di
 
 
 def _read_thresholds(run_dir: Path) -> dict[str, float]:
-    thresholds = dict(DEFAULT_THRESHOLDS_UA)
-    operations_path = run_dir / "cell_operations.jsonl"
-    try:
-        lines = operations_path.read_text().splitlines()
-    except OSError:
-        return thresholds
-    for line in lines:
-        try:
-            item = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        operation = item.get("operation")
-        steps = item.get("steps") or []
-        for step in steps:
-            threshold = _float_or_none(str(step.get("threshold_uA")) if step.get("threshold_uA") is not None else None)
-            if operation in thresholds and threshold is not None:
-                thresholds[operation] = threshold
-    return thresholds
+    return dict(DEFAULT_THRESHOLDS_UA)
 
 
 def _parse_scan_debug_process(command: str) -> dict[str, Any]:
@@ -321,6 +304,23 @@ def _array_resume_info(run_dir: Path, rows: list[dict[str, Any]]) -> dict[str, A
     }
 
 
+def _latest_array_heatmap_cells(run_dir: Path) -> dict[str, dict[str, Any]]:
+    for manifest in sorted(run_dir.parent.glob("*/manifest.csv"), key=lambda path: _run_updated_at(path.parent), reverse=True):
+        if manifest.parent == run_dir:
+            continue
+        rows = _read_manifest(manifest)
+        if not _array_resume_info(manifest.parent, rows).get("isArrayRun"):
+            continue
+        latest_by_cell: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            cell = row.get("cellAddress")
+            if cell and _is_read_row(row):
+                latest_by_cell[_cell_key(cell)] = row
+        if latest_by_cell:
+            return latest_by_cell
+    return {}
+
+
 def _summarize(run_dir: Path, rows: list[dict[str, Any]]) -> dict[str, Any]:
     log_events = _recent_log_events(run_dir)
     progress_events = _read_progress_events(run_dir)
@@ -365,6 +365,10 @@ def _summarize(run_dir: Path, rows: list[dict[str, Any]]) -> dict[str, Any]:
     values = [row["current_uA"] for row in latest_read_by_cell.values() if row.get("current_uA") is not None]
     min_current = min(values) if values else None
     max_current = max(values) if values else None
+    heatmap_cells = dict(latest_read_by_cell)
+    if not _array_resume_info(run_dir, rows).get("isArrayRun"):
+        heatmap_cells = _latest_array_heatmap_cells(run_dir)
+        heatmap_cells.update(latest_read_by_cell)
 
     return {
         "run": {
@@ -388,7 +392,7 @@ def _summarize(run_dir: Path, rows: list[dict[str, Any]]) -> dict[str, Any]:
         },
         "scale": {"min_uA": min_current, "max_uA": max_current},
         "thresholds_uA": thresholds,
-        "cells": list(latest_read_by_cell.values()),
+        "cells": list(heatmap_cells.values()),
         "history": rows[-160:],
         "readHistory": reads[-160:],
         "logEvents": log_events,

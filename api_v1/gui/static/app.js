@@ -277,7 +277,7 @@ function renderChart(summary) {
 
   drawPhaseBands(ctx, pulses, xFor, padLeft, plotW, bottomY, bottomH);
   drawAxes(ctx, padLeft, padTop, plotW, topH, bottomY, bottomH, rect.width, rect.height);
-  drawThresholds(ctx, padLeft, plotW, yCurrent, currentMin, currentMax, scaleThresholds(summary?.thresholds_uA || {}));
+  drawThresholds(ctx, padLeft, plotW, yCurrent, currentMin, currentMax, summary?.thresholds_uA || {});
   drawTransition(ctx, pulses, xFor, padTop, topH, bottomY, bottomH);
   drawCurrentTrace(ctx, pulses, xFor, yCurrent);
   drawVoltageBars(ctx, pulses, xFor, yZero, yVoltage);
@@ -323,12 +323,6 @@ function buildPulseSeries(history) {
   return pulses.slice(-80);
 }
 
-function scaleThresholds(thresholds) {
-  return Object.fromEntries(
-    Object.entries(thresholds).map(([key, value]) => [key, scaleCurrent(Number(value))])
-  );
-}
-
 function signedVoltage(row) {
   const value = Number.isFinite(row.vcc_wl_set_V) ? row.vcc_wl_set_V : row.vcc_set_V;
   if (!Number.isFinite(value)) return 0;
@@ -364,9 +358,10 @@ function drawThresholds(ctx, left, width, yCurrent, currentMin, currentMax, thre
   const visible = [
     ["SET", Number(thresholds.set), "#ff3b4f"],
     ["RESET", Number(thresholds.reset), "#6ab6df"],
-  ].filter(([, threshold]) => Number.isFinite(threshold));
+  ].filter(([, rawThreshold]) => Number.isFinite(rawThreshold));
   const usedY = [];
-  visible.forEach(([label, threshold, color]) => {
+  visible.forEach(([label, rawThreshold, color]) => {
+    const threshold = rawThreshold;
     if (threshold < currentMin || threshold > currentMax) return;
     const y = yCurrent(threshold);
     let labelY = y - 7;
@@ -382,7 +377,7 @@ function drawThresholds(ctx, left, width, yCurrent, currentMin, currentMax, thre
     ctx.stroke();
     ctx.setLineDash([]);
     ctx.font = "12px system-ui";
-    const text = `${label} ${threshold.toFixed(2)} uA`;
+    const text = `${label} ${rawThreshold.toFixed(2)} uA`;
     const textW = ctx.measureText(text).width;
     const textX = left + width - textW - 8;
     ctx.fillStyle = "rgba(17, 19, 24, 0.88)";
@@ -528,16 +523,8 @@ async function refresh() {
 function renderCommandState(commands) {
   const running = commands.find((command) => command.running);
   state.runningCommandId = running?.id || "";
-  const showResume = els.operationInput.value === "read-array" && Boolean(state.arrayResume?.canResume);
-  els.resumeColField.hidden = !showResume;
-  if (showResume && document.activeElement !== els.resumeColInput) {
-    els.resumeColInput.value = String(state.arrayResume.colStart);
-  }
   els.commandBtn.disabled = !state.commandsEnabled || Boolean(running);
   els.commandBtn.textContent = running ? "Processing..." : "Start";
-  els.resumeArrayBtn.hidden = !showResume;
-  els.resumeArrayBtn.disabled = !state.commandsEnabled || Boolean(running) || !showResume;
-  els.resumeArrayBtn.textContent = "Resume array";
   els.killBtn.disabled = !running || !running.canKill;
   if (!state.commandsEnabled) {
     els.commandNote.textContent = "--allow-commands";
@@ -552,10 +539,20 @@ function renderCommandState(commands) {
     const source = running.external ? "external " : "";
     els.commandNote.textContent = `Processing ${source}${running.operation} ${target}`;
   } else {
+    const showResume = els.operationInput.value === "read-array" && Boolean(state.arrayResume?.canResume);
     els.commandNote.textContent = showResume
       ? `Ready. Suggested resume column ${state.arrayResume.colStart}.`
       : "Ready";
   }
+  const showResume = els.operationInput.value === "read-array" && Boolean(state.arrayResume?.canResume);
+  els.resumeColField.hidden = !showResume;
+  els.resumeColInput.disabled = !showResume;
+  if (showResume && document.activeElement !== els.resumeColInput) {
+    els.resumeColInput.value = String(state.arrayResume.colStart);
+  }
+  els.resumeArrayBtn.hidden = !showResume;
+  els.resumeArrayBtn.disabled = !state.commandsEnabled || Boolean(running) || !showResume;
+  els.resumeArrayBtn.textContent = "Resume array";
 }
 
 async function sendCommand(payload, targetText, extraText = "") {
@@ -620,7 +617,7 @@ for (const eventName of ["input", "change"]) {
   els.currentMaxInput.addEventListener(eventName, () => setCurrentRange("max", els.currentMaxInput.value));
 }
 els.resumeArrayBtn.addEventListener("click", async () => {
-  if (!state.arrayResume?.canResume || !state.currentRunId) return;
+  if (els.operationInput.value !== "read-array" || !state.arrayResume?.canResume || !state.currentRunId) return;
   const requestedCol = Number(els.resumeColInput.value);
   const resumeCol = Number.isFinite(requestedCol) ? Math.max(0, Math.min(31, requestedCol)) : state.arrayResume.colStart;
   await sendCommand(

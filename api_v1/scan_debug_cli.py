@@ -46,6 +46,7 @@ def build_config(args: argparse.Namespace) -> ScanDebugConfig:
         adc_dac_port=args.adc_dac_port,
         burst_initial_delay_cycles=args.burst_initial_delay_cycles,
         burst_repeat_after_done_cycles=args.burst_repeat_cycles,
+        burst_capture_timeout_seconds=args.burst_capture_timeout_seconds,
         set_sweep=SweepConfig.from_ranges(
             vcc_set_v=parse_sweep(args.set_vcc_set),
             vcc_wl_set_v=parse_sweep(args.set_vcc_wl_set),
@@ -100,6 +101,11 @@ def main() -> int:
     parser.add_argument("--saleae-restart-wait-seconds", type=float, default=float(os.environ.get("SCAN_DEBUG_SALEAE_RESTART_WAIT_SECONDS", "10")))
     parser.add_argument("--burst-initial-delay-cycles", type=int, default=int(os.environ.get("SCAN_DEBUG_BURST_INITIAL_DELAY_CYCLES", "40000000")))
     parser.add_argument("--burst-repeat-cycles", type=int, default=int(os.environ.get("SCAN_DEBUG_BURST_REPEAT_CYCLES", "10000000")))
+    parser.add_argument(
+        "--burst-capture-timeout-seconds",
+        type=float,
+        default=float(os.environ.get("SCAN_DEBUG_BURST_CAPTURE_TIMEOUT_SECONDS", "420")),
+    )
     parser.add_argument(
         "--adc-dac-port",
         default=os.environ.get("SCAN_DEBUG_ADC_DAC_PORT", "/dev/serial/by-id/usb-Teensyduino_USB_Serial_8829000-if00"),

@@ -40,7 +40,9 @@
             </div>
             <div class="scale" aria-label="Heatmap color scale">
               <span id="scaleMin">--</span>
+              <label>Min <input id="currentMinRange" type="range" min="0" max="500" step="5"><input id="currentMinInput" type="number" min="0" max="500" step="5"></label>
               <span class="scale-bar"></span>
+              <label>Max <input id="currentMaxRange" type="range" min="0" max="500" step="5"><input id="currentMaxInput" type="number" min="0" max="500" step="5"></label>
               <span id="scaleMax">--</span>
             </div>
           </div>
@@ -71,8 +73,10 @@
             <label>Col <input id="colInput" type="number" min="0" max="31" value="0"></label>
             <label class="password-field">Password <input id="zynqPasswordInput" type="password" autocomplete="off"></label>
             <label class="checkbox"><input id="dryRunInput" type="checkbox" checked> Dry run</label>
+            <label id="resumeColField" class="resume-col-field" hidden>Resume col <input id="resumeColInput" type="number" min="0" max="31" value="0"></label>
             <div class="command-buttons">
               <button id="commandBtn" type="submit">Start</button>
+              <button id="resumeArrayBtn" class="resume-btn" type="button" disabled>Resume array</button>
               <button id="killBtn" class="kill-btn" type="button" disabled>Kill</button>
             </div>
             <p id="commandNote">Start server with --allow-commands to enable.</p>

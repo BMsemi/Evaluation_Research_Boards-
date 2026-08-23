@@ -201,18 +201,42 @@ dt {
 
 .panel-head {
   justify-content: space-between;
-  align-items: start;
+  align-items: center;
   margin-bottom: 8px;
 }
 
 .scale {
   display: grid;
-  grid-template-columns: auto 110px auto;
+  grid-template-columns: 0 minmax(150px, 1fr) 120px minmax(150px, 1fr) 0;
   align-items: center;
   gap: 6px;
-  color: var(--muted);
+  color: #f3f5f7;
   font-variant-numeric: tabular-nums;
   font-size: 11px;
+  font-weight: 700;
+  flex: 1 1 auto;
+  max-width: 680px;
+}
+
+.scale label {
+  display: grid;
+  grid-template-columns: 24px minmax(78px, 1fr) 50px;
+  align-items: center;
+  gap: 4px;
+  color: var(--muted);
+}
+
+.scale input[type="range"] {
+  width: 100%;
+  min-height: 22px;
+  padding: 0;
+}
+
+.scale input[type="number"] {
+  min-width: 0;
+  height: 24px;
+  min-height: 24px;
+  padding: 0 5px;
 }
 
 .scale-bar {
@@ -309,6 +333,7 @@ dt {
 .command-form h2,
 .command-form .password-field,
 .command-form .checkbox,
+.command-form .resume-col-field,
 .command-form .command-buttons,
 .command-form p {
   grid-column: 1 / -1;
@@ -333,8 +358,13 @@ dt {
 
 .command-buttons {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: 1fr 1fr 1fr;
   gap: 8px;
+}
+
+.resume-btn {
+  background: #245b73;
+  border-color: #3d86a6;
 }
 
 .kill-btn {

@@ -167,6 +167,7 @@ class ScanDebugConfig:
     burst_repeat_after_done_cycles: int = 10_000_000
     burst_after_trigger_seconds: float = 0.000028
     burst_trim_data_seconds: float = 0.000003
+    burst_capture_timeout_seconds: float = 420.0
 
 
 @dataclass
@@ -326,19 +327,50 @@ class ScanDebugCellAPI:
                 self._append_progress("read-array", f"Column {col}: dry-run complete", cells=len(all_reads), total=total)
                 continue
             index = self._next_index()
-            self._append_progress("read-array", f"Column {col}: starting Saleae burst", cells=len(all_reads), total=total)
-            remote_output_dir = self._capture_array_burst(
-                packet,
-                self.config.read_rails,
-                bitstream,
-                index,
-                column_total,
-                row_start,
-                col,
-                f"column {col}",
-            )
-            self._append_progress("read-array", f"Column {col}: copying capture", cells=len(all_reads), total=total)
-            local_output_dir = self._copy_capture(remote_output_dir, index, f"read_array_col{col:02d}_burst", self.config.read_rails)
+            attempts = max(1, self.config.attempts)
+            local_output_dir: Path | None = None
+            remote_output_dir = ""
+            failures: list[str] = []
+            for attempt in range(1, attempts + 1):
+                attempt_note = f" attempt {attempt}" if attempts > 1 else ""
+                self._append_progress("read-array", f"Column {col}: starting Saleae burst{attempt_note}", cells=len(all_reads), total=total)
+                remote_output_dir = self._capture_array_burst(
+                    packet,
+                    self.config.read_rails,
+                    bitstream,
+                    index,
+                    column_total,
+                    row_start,
+                    col,
+                    f"column {col}",
+                    cells_done=len(all_reads),
+                    total_cells=total,
+                )
+                self._append_progress("read-array", f"Column {col}: copying capture", cells=len(all_reads), total=total)
+                local_output_dir = self._copy_capture(remote_output_dir, index, f"read_array_col{col:02d}_burst", self.config.read_rails)
+                self._append_progress("read-array", f"Column {col}: checking capture", cells=len(all_reads), total=total)
+                validation_error = self._validate_burst_manifest(local_output_dir, column_total)
+                if not validation_error:
+                    break
+                failures.append(f"attempt={attempt} {validation_error}")
+                if attempt >= attempts:
+                    raise RuntimeError(
+                        f"Column {col} capture failed validation after {attempts} attempts: {validation_error}; "
+                        f"see {local_output_dir / 'manifest.csv'}"
+                    )
+                if self._saleae_needs_restart(validation_error):
+                    self._append_progress(
+                        "read-array",
+                        f"Column {col}: restarting capture service after validation error",
+                        cells=len(all_reads),
+                        total=total,
+                    )
+                    restart_log = self._restart_saleae_automation(index, f"read_array_col{col:02d}", attempt)
+                    failures.append(f"saleae_restart_after_attempt={attempt} log={restart_log}")
+                self._append_progress("read-array", f"Column {col}: retrying capture", cells=len(all_reads), total=total)
+                time.sleep(2.0)
+            if local_output_dir is None:
+                raise RuntimeError(f"Column {col} capture did not produce a local output directory")
             self._append_progress("read-array", f"Column {col}: decoding reads", cells=len(all_reads), total=total)
             reads = self._append_burst_manifest(local_output_dir, remote_output_dir, bitstream)
             all_reads.extend(reads)
@@ -780,6 +812,8 @@ exit
         row_start: int,
         col_start: int,
         burst_label: str = "burst read",
+        cells_done: int | None = None,
+        total_cells: int | None = None,
     ) -> str:
         env = {
             "ADC_DAC_PORT": self.config.adc_dac_port,
@@ -801,25 +835,81 @@ exit
         env_text = " ".join(f"{k}={self._sh_quote(v)}" for k, v in env.items())
         capture_cmd = f"env {env_text} {self.config.saleae_burst_capture_script}"
         capture_log = self.config.run_dir / f"capture_{index}_read_array_burst.log"
-        capture_proc = self._popen_saleae(capture_cmd)
-        time.sleep(2.0)
-        self._append_progress("read-array", f"Programming FPGA for {burst_label}", mode="burst")
-        program_rc = self._program_fpga(bitstream)
-        self._append_progress("read-array", f"Saleae capturing {burst_label}", mode="burst")
-        output, _ = capture_proc.communicate()
-        capture_log.write_text(output or "")
-        remote_output_dir = ""
-        for line in (output or "").splitlines():
-            if line.startswith("OUTPUT_ROOT="):
-                remote_output_dir = line.split("=", 1)[1].strip()
-            elif line.startswith("DONE output_root="):
-                remote_output_dir = line.split("output_root=", 1)[1].split()[0].strip()
-        if capture_proc.returncode != 0 or program_rc != 0 or not remote_output_dir:
-            raise RuntimeError(
-                f"burst capture/program failed capture_rc={capture_proc.returncode} "
-                f"program_rc={program_rc} remote_output_dir={remote_output_dir or '<missing>'}; see {capture_log}"
+        attempts = max(1, self.config.attempts)
+        failures: list[str] = []
+        restarted_saleae = False
+        progress_kwargs = {
+            "cells": cells_done,
+            "total": total_cells,
+        } if cells_done is not None and total_cells is not None else {}
+        for attempt in range(1, attempts + 1):
+            attempt_log = capture_log if attempts == 1 else self.config.run_dir / f"capture_{index}_read_array_burst_attempt{attempt}.log"
+            capture_proc = self._popen_saleae(capture_cmd)
+            time.sleep(2.0)
+            self._append_progress("read-array", f"Programming FPGA for {burst_label}", mode="burst")
+            program_rc = self._program_fpga(bitstream)
+            self._append_progress("read-array", f"Saleae capturing {burst_label}", mode="burst")
+            timed_out = False
+            try:
+                output, _ = capture_proc.communicate(timeout=self.config.burst_capture_timeout_seconds)
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                capture_proc.kill()
+                output, _ = capture_proc.communicate()
+                output = (output or "") + f"\nTIMEOUT after {self.config.burst_capture_timeout_seconds:.0f}s waiting for Saleae burst capture\n"
+            attempt_log.write_text(output or "")
+            remote_output_dir = ""
+            for line in (output or "").splitlines():
+                if line.startswith("OUTPUT_ROOT="):
+                    remote_output_dir = line.split("=", 1)[1].strip()
+                elif line.startswith("DONE output_root="):
+                    remote_output_dir = line.split("output_root=", 1)[1].split()[0].strip()
+            capture_rc = capture_proc.returncode
+            if capture_rc == 0 and program_rc == 0 and remote_output_dir:
+                if attempts > 1:
+                    capture_log.write_text(f"SUCCESS attempt={attempt}; see {attempt_log}\n")
+                return remote_output_dir
+
+            reason = (
+                f"attempt={attempt} capture_rc={capture_rc} program_rc={program_rc} "
+                f"remote_output_dir={remote_output_dir or '<missing>'} log={attempt_log}"
             )
-        return remote_output_dir
+            if timed_out:
+                reason += " timeout=true"
+            failures.append(reason)
+            if attempt < attempts:
+                should_restart = timed_out or self._saleae_needs_restart(output or "")
+                if should_restart:
+                    self._append_progress(
+                        "read-array",
+                        f"{burst_label.capitalize()}: restarting capture service after attempt {attempt}",
+                        mode="burst",
+                        **progress_kwargs,
+                    )
+                    restart_log = self._restart_saleae_automation(index, "read_array_burst", attempt)
+                    failures.append(f"saleae_restart_after_attempt={attempt} log={restart_log}")
+                    restarted_saleae = True
+                elif restarted_saleae:
+                    self._append_progress(
+                        "read-array",
+                        f"{burst_label.capitalize()}: retrying capture after restart",
+                        mode="burst",
+                        **progress_kwargs,
+                    )
+                else:
+                    self._append_progress(
+                        "read-array",
+                        f"{burst_label.capitalize()}: retrying capture after attempt {attempt}",
+                        mode="burst",
+                        **progress_kwargs,
+                    )
+                time.sleep(2.0)
+
+        capture_log.write_text("\n".join(failures) + "\n")
+        raise RuntimeError(
+            f"burst capture/program failed {burst_label} after {attempts} attempts; "
+            f"see {capture_log}"
+        )
 
     def _append_burst_manifest(self, local_output_dir: Path, remote_output_dir: str, bitstream: str) -> list[dict[str, object]]:
         burst_manifest = local_output_dir / "manifest.csv"
@@ -862,6 +952,23 @@ exit
                 if (offset + 1) % 64 == 0:
                     self._append_progress("read-array", "Publishing burst reads", cells=offset + 1)
         return reads
+
+    def _validate_burst_manifest(self, local_output_dir: Path, expected_count: int) -> str:
+        burst_manifest = local_output_dir / "manifest.csv"
+        if not burst_manifest.exists():
+            return f"burst manifest missing: {burst_manifest}"
+        with burst_manifest.open(newline="") as handle:
+            rows = list(csv.DictReader(handle))
+        if len(rows) < expected_count:
+            return f"burst manifest has {len(rows)} rows, expected {expected_count}"
+        saleae_errors = [
+            str(row.get("error", ""))
+            for row in rows
+            if row.get("error") and self._saleae_needs_restart(str(row.get("error", "")))
+        ]
+        if saleae_errors:
+            return saleae_errors[0][:220]
+        return ""
 
     def _capture_remote(self, packet: int, rails: RailVoltages, bitstream: str, index: int, kind: str) -> str:
         env = {
@@ -925,6 +1032,8 @@ exit
             "Connection refused",
             "DeviceSetupFailure",
             "failed to connect to all addresses",
+            "StatusCode.UNAVAILABLE",
+            "_InactiveRpcError",
         )
         return any(marker in output for marker in restart_markers)
 

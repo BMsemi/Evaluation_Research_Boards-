@@ -129,7 +129,7 @@ def _recent_log_events(run_dir: Path) -> list[dict[str, Any]]:
                 "message": message,
                 "path": str(log_path.relative_to(ROOT)),
                 "updated": log_path.stat().st_mtime,
-                "eventOrder": _log_event_order(log_path),
+                "eventOrder": log_path.stat().st_mtime * 1000,
             }
         )
     return events[-4:]
@@ -175,7 +175,14 @@ def _log_event_order(path: Path) -> float:
 
 
 def _extract_error_message(text: str) -> str:
-    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    lines: list[str] = []
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if line.startswith('{"progress":'):
+            continue
+        lines.append(line)
     priority = ("permission denied", "readtimeout", "deviceerror", "runtimeerror", "traceback", "exception", "error")
     for keyword in priority:
         for line in reversed(lines):
@@ -185,6 +192,18 @@ def _extract_error_message(text: str) -> str:
         if "error" in line.lower() or "traceback" in line.lower() or "exception" in line.lower():
             return line[-220:]
     return ""
+
+
+def _saleae_error_needs_restart(text: str) -> bool:
+    markers = (
+        "Failed to connect to remote host: Connection refused",
+        "Connection refused",
+        "DeviceSetupFailure",
+        "failed to connect to all addresses",
+        "StatusCode.UNAVAILABLE",
+        "_InactiveRpcError",
+    )
+    return any(marker in text for marker in markers)
 
 
 def _latest_manifest_mtime(run_dir: Path) -> float:
@@ -277,6 +296,31 @@ def _is_read_row(row: dict[str, Any]) -> bool:
     return row.get("operation") == "read" or str(row.get("stage", "")).startswith("read")
 
 
+def _array_resume_info(run_dir: Path, rows: list[dict[str, Any]]) -> dict[str, Any]:
+    is_array_run = "read-array" in run_dir.name or any(str(row.get("stage", "")).startswith("array_") for row in rows)
+    col_rows: dict[int, list[dict[str, Any]]] = {}
+    for row in rows:
+        cell = row.get("cellAddress")
+        if not _is_read_row(row) or not isinstance(cell, dict) or not isinstance(cell.get("col"), int):
+            continue
+        col_rows.setdefault(cell["col"], []).append(row)
+    complete_cols = {
+        col
+        for col, items in col_rows.items()
+        if len(items) >= GRID_SIZE
+        and not any(row.get("error") and _saleae_error_needs_restart(str(row.get("error", ""))) for row in items)
+    }
+    incomplete_cols = [col for col in range(GRID_SIZE) if col not in complete_cols]
+    col_start = incomplete_cols[0] if incomplete_cols else None
+    return {
+        "isArrayRun": is_array_run,
+        "canResume": is_array_run and col_start is not None and bool(col_rows),
+        "colStart": col_start,
+        "completedColumns": len(complete_cols),
+        "incompleteColumns": incomplete_cols,
+    }
+
+
 def _summarize(run_dir: Path, rows: list[dict[str, Any]]) -> dict[str, Any]:
     log_events = _recent_log_events(run_dir)
     progress_events = _read_progress_events(run_dir)
@@ -350,6 +394,7 @@ def _summarize(run_dir: Path, rows: list[dict[str, Any]]) -> dict[str, Any]:
         "logEvents": log_events,
         "progressEvents": progress_events,
         "activeError": active_error,
+        "arrayResume": _array_resume_info(run_dir, rows),
     }
 
 
@@ -404,6 +449,8 @@ class GuiHandler(SimpleHTTPRequestHandler):
         array_mode = "burst-columns"
         row = int(payload.get("row", 0))
         col = int(payload.get("col", 0))
+        resume_run = str(payload.get("resumeRun", "")).strip()
+        resume_col = _int_or_none(payload.get("resumeCol"))
         zynq_password = str(payload.get("zynqPassword", ""))
         dry_run = bool(payload.get("dryRun", False))
         confirmed = bool(payload.get("confirmHardware", False))
@@ -419,14 +466,38 @@ class GuiHandler(SimpleHTTPRequestHandler):
         if any(state["proc"].poll() is None for state in self.running_commands.values()):
             self._send_json({"error": "A GUI command is already processing."}, HTTPStatus.CONFLICT)
             return
-        run_label = "array" if operation == "read-array" else f"r{row:02d}c{col:02d}"
-        run_dir = ROOT / "api_v1" / "runs" / f"gui_{time.strftime('%Y%m%d_%H%M%S')}_{run_label}_{operation}"
-        run_dir.mkdir(parents=True, exist_ok=True)
+        resume_info: dict[str, Any] | None = None
+        if resume_run:
+            if operation != "read-array":
+                self._send_json({"error": "Only read-array can resume a previous run."}, HTTPStatus.BAD_REQUEST)
+                return
+            run_dir = (self.config.runs_dir / resume_run).resolve()
+            try:
+                run_dir.relative_to(self.config.runs_dir)
+            except ValueError:
+                self._send_json({"error": "Invalid resume run."}, HTTPStatus.BAD_REQUEST)
+                return
+            rows = _read_manifest(_manifest_for_run(run_dir))
+            resume_info = _array_resume_info(run_dir, rows)
+            if not resume_info["canResume"]:
+                self._send_json({"error": "Selected run has no missing array columns to resume."}, HTTPStatus.BAD_REQUEST)
+                return
+            if resume_col is None:
+                resume_col = int(resume_info["colStart"])
+            if not 0 <= resume_col < GRID_SIZE:
+                self._send_json({"error": "Resume column must be 0..31."}, HTTPStatus.BAD_REQUEST)
+                return
+        else:
+            run_label = "array" if operation == "read-array" else f"r{row:02d}c{col:02d}"
+            run_dir = ROOT / "api_v1" / "runs" / f"gui_{time.strftime('%Y%m%d_%H%M%S')}_{run_label}_{operation}"
+            run_dir.mkdir(parents=True, exist_ok=True)
         cmd = [sys.executable, str(ROOT / "api_v1" / "scan_debug_cli.py"), operation, "--run-dir", str(run_dir)]
         if operation != "read-array":
             cmd.extend(["--row", str(row), "--col", str(col)])
         else:
             cmd.extend(["--array-mode", array_mode])
+            if resume_info:
+                cmd.extend(["--col-start", str(resume_col)])
         safe_cmd = list(cmd)
         if zynq_password:
             cmd.extend(["--zynq-password", zynq_password])
@@ -434,7 +505,7 @@ class GuiHandler(SimpleHTTPRequestHandler):
         if dry_run:
             cmd.append("--dry-run")
             safe_cmd.append("--dry-run")
-        log_path = run_dir / "gui_command.log"
+        log_path = run_dir / ("gui_command.log" if not resume_info else f"gui_command_resume_{time.strftime('%Y%m%d_%H%M%S')}.log")
         log_handle = log_path.open("w")
         proc = subprocess.Popen(cmd, cwd=str(ROOT), text=True, stdout=log_handle, stderr=subprocess.STDOUT, start_new_session=True)
         key = f"{int(time.time() * 1000)}"
@@ -442,6 +513,7 @@ class GuiHandler(SimpleHTTPRequestHandler):
             "proc": proc,
             "operation": operation,
             "arrayMode": array_mode if operation == "read-array" else "",
+            "resume": bool(resume_info),
             "row": row,
             "col": col,
             "runDir": str(run_dir.relative_to(ROOT)),
@@ -449,7 +521,14 @@ class GuiHandler(SimpleHTTPRequestHandler):
             "started": time.time(),
             "logHandle": log_handle,
         }
-        self._send_json({"id": key, "runDir": str(run_dir.relative_to(ROOT)), "command": safe_cmd})
+        self._send_json(
+            {
+                "id": key,
+                "runDir": str(run_dir.relative_to(ROOT)),
+                "command": safe_cmd,
+                "resume": resume_info,
+            }
+        )
 
     def _command_state(self) -> list[dict[str, Any]]:
         states = []

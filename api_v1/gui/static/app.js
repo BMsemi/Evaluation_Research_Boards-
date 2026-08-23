@@ -3,7 +3,11 @@ const state = {
   activeKey: "",
   commandsEnabled: false,
   manualRun: false,
+  currentMin_uA: 80,
+  currentMax_uA: 335,
 };
+
+const CURRENT_DISPLAY_SCALE = 1 / 1.2;
 
 const els = {
   runSelect: document.getElementById("runSelect"),
@@ -15,6 +19,10 @@ const els = {
   heatmap: document.getElementById("heatmap"),
   scaleMin: document.getElementById("scaleMin"),
   scaleMax: document.getElementById("scaleMax"),
+  currentMinRange: document.getElementById("currentMinRange"),
+  currentMaxRange: document.getElementById("currentMaxRange"),
+  currentMinInput: document.getElementById("currentMinInput"),
+  currentMaxInput: document.getElementById("currentMaxInput"),
   activeCell: document.getElementById("activeCell"),
   opDot: document.getElementById("opDot"),
   opCompact: document.getElementById("opCompact"),
@@ -26,13 +34,24 @@ const els = {
   colInput: document.getElementById("colInput"),
   zynqPasswordInput: document.getElementById("zynqPasswordInput"),
   dryRunInput: document.getElementById("dryRunInput"),
+  resumeColField: document.getElementById("resumeColField"),
+  resumeColInput: document.getElementById("resumeColInput"),
   commandBtn: document.getElementById("commandBtn"),
+  resumeArrayBtn: document.getElementById("resumeArrayBtn"),
   killBtn: document.getElementById("killBtn"),
   commandNote: document.getElementById("commandNote"),
 };
 
 function formatCurrent(value) {
+  return formatScaledCurrent(scaleCurrent(value));
+}
+
+function formatScaledCurrent(value) {
   return Number.isFinite(value) ? `${value.toFixed(1)}` : "--";
+}
+
+function scaleCurrent(value) {
+  return Number.isFinite(value) ? value * CURRENT_DISPLAY_SCALE : value;
 }
 
 function formatCell(cell) {
@@ -50,6 +69,36 @@ function colorFor(value, min, max) {
   const hue = 205 - t * 170;
   const light = 38 + t * 20;
   return `hsl(${hue}, 78%, ${light}%)`;
+}
+
+function currentRange() {
+  const min = Number(state.currentMin_uA);
+  const max = Number(state.currentMax_uA);
+  return {
+    min: Number.isFinite(min) ? min : 0,
+    max: Number.isFinite(max) && max > min ? max : min + 5,
+  };
+}
+
+function syncCurrentRangeControls() {
+  const { min, max } = currentRange();
+  els.currentMinRange.value = String(min);
+  els.currentMinInput.value = String(min);
+  els.currentMaxRange.value = String(max);
+  els.currentMaxInput.value = String(max);
+}
+
+function setCurrentRange(part, value) {
+  const next = Number(value);
+  if (!Number.isFinite(next)) return;
+  if (part === "min") {
+    state.currentMin_uA = Math.min(next, state.currentMax_uA - 5);
+  } else {
+    state.currentMax_uA = Math.max(next, state.currentMin_uA + 5);
+  }
+  syncCurrentRangeControls();
+  repaintHeatmap();
+  renderChart(state.lastSummary);
 }
 
 function ensureGrid() {
@@ -169,20 +218,25 @@ function formatApiMessage(message) {
 
 function renderHeatmap(summary) {
   ensureGrid();
-  const min = 100;
-  const max = 400;
-  const activeKey = cellKey(summary?.lastCell);
-  const latest = new Map();
-  for (const item of summary?.cells || []) latest.set(cellKey(item.cellAddress), item);
+  state.heatmapActiveKey = cellKey(summary?.lastCell);
+  state.heatmapLatest = new Map();
+  for (const item of summary?.cells || []) state.heatmapLatest.set(cellKey(item.cellAddress), item);
+  repaintHeatmap();
+}
+
+function repaintHeatmap() {
+  ensureGrid();
+  const { min, max } = currentRange();
+  const latest = state.heatmapLatest || new Map();
   for (const node of els.heatmap.children) {
     const item = latest.get(node.dataset.key);
-    const value = item?.current_uA;
+    const value = scaleCurrent(item?.current_uA);
     node.style.background = colorFor(value, min, max);
-    node.classList.toggle("active", node.dataset.key === activeKey);
-    node.title = item ? `${formatCell(item.cellAddress)} ${formatCurrent(value)} uA ${item.operation}` : `${node.dataset.key}: no read`;
+    node.classList.toggle("active", node.dataset.key === state.heatmapActiveKey);
+    node.title = item ? `${formatCell(item.cellAddress)} ${formatScaledCurrent(value)} uA ${item.operation}` : `${node.dataset.key}: no read`;
   }
-  els.scaleMin.textContent = "High Resistance(HRS)";
-  els.scaleMax.textContent = "Low Resistance(LRS)";
+  els.scaleMin.textContent = "";
+  els.scaleMax.textContent = "";
 }
 
 function renderChart(summary) {
@@ -210,12 +264,7 @@ function renderChart(summary) {
   const plotW = rect.width - padLeft - padRight;
   const xFor = (index) => padLeft + (plotW * index) / Math.max(1, pulses.length - 1);
 
-  const currentValues = pulses.map((item) => item.current).filter(Number.isFinite);
-  const thresholdValues = Object.values(summary?.thresholds_uA || {}).map(Number).filter(Number.isFinite);
-  const rawMin = Math.min(...currentValues, 0);
-  const rawMax = 400;
-  const currentMin = Math.floor(rawMin / 25) * 25;
-  const currentMax = Math.ceil(rawMax / 25) * 25;
+  const { min: currentMin, max: currentMax } = currentRange();
   const currentSpan = currentMax === currentMin ? 1 : currentMax - currentMin;
   const yCurrent = (value) => {
     const clamped = Math.max(currentMin, Math.min(currentMax, value));
@@ -228,7 +277,7 @@ function renderChart(summary) {
 
   drawPhaseBands(ctx, pulses, xFor, padLeft, plotW, bottomY, bottomH);
   drawAxes(ctx, padLeft, padTop, plotW, topH, bottomY, bottomH, rect.width, rect.height);
-  drawThresholds(ctx, padLeft, plotW, yCurrent, currentMin, currentMax, summary?.thresholds_uA || {});
+  drawThresholds(ctx, padLeft, plotW, yCurrent, currentMin, currentMax, scaleThresholds(summary?.thresholds_uA || {}));
   drawTransition(ctx, pulses, xFor, padTop, topH, bottomY, bottomH);
   drawCurrentTrace(ctx, pulses, xFor, yCurrent);
   drawVoltageBars(ctx, pulses, xFor, yZero, yVoltage);
@@ -259,7 +308,7 @@ function buildPulseSeries(history) {
       continue;
     }
     if (pending && pending.current === null) {
-      pending.current = row.current_uA;
+      pending.current = scaleCurrent(row.current_uA);
       pending.readStage = row.stage;
     } else {
       pulses.push({
@@ -267,11 +316,17 @@ function buildPulseSeries(history) {
         op: "read",
         packet: row.packet,
         voltage: 0,
-        current: row.current_uA,
+        current: scaleCurrent(row.current_uA),
       });
     }
   }
   return pulses.slice(-80);
+}
+
+function scaleThresholds(thresholds) {
+  return Object.fromEntries(
+    Object.entries(thresholds).map(([key, value]) => [key, scaleCurrent(Number(value))])
+  );
 }
 
 function signedVoltage(row) {
@@ -327,7 +382,7 @@ function drawThresholds(ctx, left, width, yCurrent, currentMin, currentMax, thre
     ctx.stroke();
     ctx.setLineDash([]);
     ctx.font = "12px system-ui";
-    const text = `${label} ${threshold} uA`;
+    const text = `${label} ${threshold.toFixed(2)} uA`;
     const textW = ctx.measureText(text).width;
     const textX = left + width - textW - 8;
     ctx.fillStyle = "rgba(17, 19, 24, 0.88)";
@@ -458,8 +513,12 @@ async function refresh() {
   const query = state.manualRun && state.selectedRun ? `?run=${encodeURIComponent(state.selectedRun)}` : "";
   const response = await fetch(`/api/state${query}`, { cache: "no-store" });
   const data = await response.json();
+  state.lastSummary = data.state || null;
+  state.currentRunId = data.state?.run?.id || "";
+  state.arrayResume = data.state?.arrayResume || null;
   renderRuns(data.runs || [], data.state?.run?.id || "");
   state.commandsEnabled = Boolean(data.commandsEnabled);
+  state.lastCommands = data.runningCommands || [];
   renderCommandState(data.runningCommands || []);
   renderMetrics(data.state);
   renderHeatmap(data.state);
@@ -469,8 +528,16 @@ async function refresh() {
 function renderCommandState(commands) {
   const running = commands.find((command) => command.running);
   state.runningCommandId = running?.id || "";
+  const showResume = els.operationInput.value === "read-array" && Boolean(state.arrayResume?.canResume);
+  els.resumeColField.hidden = !showResume;
+  if (showResume && document.activeElement !== els.resumeColInput) {
+    els.resumeColInput.value = String(state.arrayResume.colStart);
+  }
   els.commandBtn.disabled = !state.commandsEnabled || Boolean(running);
   els.commandBtn.textContent = running ? "Processing..." : "Start";
+  els.resumeArrayBtn.hidden = !showResume;
+  els.resumeArrayBtn.disabled = !state.commandsEnabled || Boolean(running) || !showResume;
+  els.resumeArrayBtn.textContent = "Resume array";
   els.killBtn.disabled = !running || !running.canKill;
   if (!state.commandsEnabled) {
     els.commandNote.textContent = "--allow-commands";
@@ -485,8 +552,33 @@ function renderCommandState(commands) {
     const source = running.external ? "external " : "";
     els.commandNote.textContent = `Processing ${source}${running.operation} ${target}`;
   } else {
-    els.commandNote.textContent = "Ready";
+    els.commandNote.textContent = showResume
+      ? `Ready. Suggested resume column ${state.arrayResume.colStart}.`
+      : "Ready";
   }
+}
+
+async function sendCommand(payload, targetText, extraText = "") {
+  if (!payload.dryRun) {
+    const ok = window.confirm(
+      `Send ${payload.operation.toUpperCase()} to hardware for ${targetText}?\n\n` +
+      "This will run the API against the connected bench." + extraText
+    );
+    if (!ok) {
+      els.commandNote.textContent = "Cancelled";
+      return;
+    }
+    payload.confirmHardware = true;
+  }
+  const response = await fetch("/api/command", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const data = await response.json();
+  els.commandNote.textContent = data.error || `Started ${payload.operation} in ${data.runDir}`;
+  if (!data.error) state.runningCommandId = data.id;
+  setTimeout(refresh, 900);
 }
 
 els.runSelect.addEventListener("change", () => {
@@ -518,6 +610,31 @@ els.killBtn.addEventListener("click", async () => {
   els.commandNote.textContent = data.error || data.message || "Kill signal sent";
   setTimeout(refresh, 500);
 });
+els.operationInput.addEventListener("change", () => {
+  renderCommandState(state.lastCommands || []);
+});
+for (const eventName of ["input", "change"]) {
+  els.currentMinRange.addEventListener(eventName, () => setCurrentRange("min", els.currentMinRange.value));
+  els.currentMinInput.addEventListener(eventName, () => setCurrentRange("min", els.currentMinInput.value));
+  els.currentMaxRange.addEventListener(eventName, () => setCurrentRange("max", els.currentMaxRange.value));
+  els.currentMaxInput.addEventListener(eventName, () => setCurrentRange("max", els.currentMaxInput.value));
+}
+els.resumeArrayBtn.addEventListener("click", async () => {
+  if (!state.arrayResume?.canResume || !state.currentRunId) return;
+  const requestedCol = Number(els.resumeColInput.value);
+  const resumeCol = Number.isFinite(requestedCol) ? Math.max(0, Math.min(31, requestedCol)) : state.arrayResume.colStart;
+  await sendCommand(
+    {
+      operation: "read-array",
+      resumeRun: state.currentRunId,
+      resumeCol,
+      zynqPassword: els.zynqPasswordInput.value,
+      dryRun: els.dryRunInput.checked,
+    },
+    `remaining array columns starting at column ${resumeCol}`,
+    "\n\nThis will append to the selected unfinished run."
+  );
+});
 els.commandForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   const payload = {
@@ -527,30 +644,12 @@ els.commandForm.addEventListener("submit", async (event) => {
     zynqPassword: els.zynqPasswordInput.value,
     dryRun: els.dryRunInput.checked,
   };
-  if (!payload.dryRun) {
-    const target = payload.operation === "read-array" ? "the full 32x32 array" : `row ${payload.row}, col ${payload.col}`;
-    const extra = payload.operation === "read-array" ? "\n\nThis will read 1024 cells and may take a long time." : "";
-    const ok = window.confirm(
-      `Send ${payload.operation.toUpperCase()} to hardware for ${target}?\n\n` +
-      "This will run the API against the connected bench." + extra
-    );
-    if (!ok) {
-      els.commandNote.textContent = "Cancelled";
-      return;
-    }
-    payload.confirmHardware = true;
-  }
-  const response = await fetch("/api/command", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-  const data = await response.json();
-  els.commandNote.textContent = data.error || `Started ${payload.operation} in ${data.runDir}`;
-  if (!data.error) state.runningCommandId = data.id;
-  setTimeout(refresh, 900);
+  const target = payload.operation === "read-array" ? "the full 32x32 array" : `row ${payload.row}, col ${payload.col}`;
+  const extra = payload.operation === "read-array" ? "\n\nThis will read 1024 cells and may take a long time." : "";
+  await sendCommand(payload, target, extra);
 });
 
 ensureGrid();
+syncCurrentRangeControls();
 refresh();
 setInterval(refresh, 1500);

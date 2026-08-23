@@ -377,7 +377,10 @@ def _combined_cell_history(run_dir: Path, rows: list[dict[str, Any]], last_cell:
             if row.get("cellAddress") and _cell_key(row["cellAddress"]) == target_key
         )
     combined.extend(rows)
-    return combined[-160:]
+    out = combined[-160:]
+    for index, row in enumerate(out):
+        row["eventOrder"] = index + 0.9
+    return out
 
 
 def _summarize(run_dir: Path, rows: list[dict[str, Any]]) -> dict[str, Any]:

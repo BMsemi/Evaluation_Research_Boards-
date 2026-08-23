@@ -322,6 +322,8 @@ static const int DAC_FULL_SCALE_MV = 10000;
 static const float DAC_FULL_SCALE_VOLTS = 10.0f;
 static const int DAC3_VCC_WL_SET_FULL_SCALE_MV = 5000;
 static const int DAC6_VCC_SET_FULL_SCALE_MV = 10000;
+static const int DAC7_VDDIO_FULL_SCALE_MV = 5000;
+static const int VDDIO_TARGET_MV = 4000;
 static const int DAC13_VDDA1_FULL_SCALE_MV = 5000;
 static const int DAC15_VDDC2_FULL_SCALE_MV = 5000;
 
@@ -340,6 +342,10 @@ void writeVccSetMilliVolts(int mv) {
 
 void writeVccWlSetMilliVolts(int mv) {
   dac_write(dac[3], milliVoltsToDacPercent(mv, DAC3_VCC_WL_SET_FULL_SCALE_MV));
+}
+
+void writeVddioMilliVolts(int mv) {
+  dac_write(dac[7], milliVoltsToDacPercent(mv, DAC7_VDDIO_FULL_SCALE_MV));
 }
 
 void writeVddc2MilliVolts(int mv) {
@@ -430,6 +436,7 @@ void applyScanDebugCustomSetRails(int vccSetMv, int vccWlSetMv) {
   writeDacMilliVolts(dac[1], 0);          // Vcc_wl_read
   writeVccWlSetMilliVolts(vccWlSetMv);    // Vcc_wl_set
   writeDacMilliVolts(dac[4], 0);          // Vcc_wl_reset
+  writeVddioMilliVolts(VDDIO_TARGET_MV);   // VDDIO
   writeVdda1MilliVolts(5000);             // VDDa1
   writeVddc2MilliVolts(2100);             // VDDc2
 }
@@ -468,6 +475,9 @@ bool handleDirectDacSet(const String &cmd) {
   } else if (dacIndex == 6) {
     mv = clampInt(mv, 0, DAC6_VCC_SET_FULL_SCALE_MV);
     writeVccSetMilliVolts(mv);
+  } else if (dacIndex == 7) {
+    mv = clampInt(mv, 0, DAC7_VDDIO_FULL_SCALE_MV);
+    writeVddioMilliVolts(mv);
   } else if (dacIndex == 15) {
     mv = clampInt(mv, 0, DAC15_VDDC2_FULL_SCALE_MV);
     writeVddc2MilliVolts(mv);
@@ -1318,7 +1328,7 @@ void dac_powerup_continuous_nonblocking() {
         writeVccWlSetMilliVolts(2500);
         dac_write(dac[4],  voltsToDacPercent(0.0f));
         writeVccSetMilliVolts(1700);
-        dac_write(dac[7],  voltsToDacPercent(5.0f));
+        writeVddioMilliVolts(VDDIO_TARGET_MV);
         dac_write(dac[9],  voltsToDacPercent(0.5f));
         dac_write(dac[10], voltsToDacPercent(0.9f));
         dac_write(dac[11], voltsToDacPercent(0.2f));
@@ -1338,7 +1348,7 @@ void dac_powerup_continuous() {
     dac_write(dac[2],  voltsToDacPercent(0.0f));   // DAC[2]  = old Vcc_set channel, kept low
     writeVccWlSetMilliVolts(2500);                 // DAC[3]  = 2.5V for Vcc_wl_set
     dac_write(dac[4],  voltsToDacPercent(0.0f));   // DAC[4]  = 0V for Vcc_wl_reset
-    dac_write(dac[7],  voltsToDacPercent(5.0f));   // DAC[7]  = 5.0V for Caravel VDDIO
+    writeVddioMilliVolts(VDDIO_TARGET_MV);          // DAC[7]  = 4.0V for Caravel VDDIO
     writeVccSetMilliVolts(1700);                   // DAC[6]  = 1.7V for Vcc_set
     dac_write(dac[9],  voltsToDacPercent(0.5f));   // DAC[9]  = 0.5V
     dac_write(dac[10], voltsToDacPercent(0.9f));   // DAC[10] = 0.9V

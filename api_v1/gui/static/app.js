@@ -548,6 +548,7 @@ async function refresh() {
   state.lastSummary = data.state || null;
   state.currentRunId = data.state?.run?.id || "";
   state.arrayResume = data.state?.arrayResume || null;
+  state.sweepResume = data.state?.sweepResume || null;
   renderRuns(data.runs || [], data.state?.run?.id || "");
   state.commandsEnabled = Boolean(data.commandsEnabled);
   state.lastCommands = data.runningCommands || [];
@@ -578,20 +579,29 @@ function renderCommandState(commands) {
     const source = running.external ? "external " : "";
     els.commandNote.textContent = `Processing ${source}${running.operation} ${target}`;
   } else {
-    const showResume = els.operationInput.value === "read-array" && Boolean(state.arrayResume?.canResume);
-    els.commandNote.textContent = showResume
+    const showArrayResume = els.operationInput.value === "read-array" && Boolean(state.arrayResume?.canResume);
+    const showSweepResume = ["set", "reset"].includes(els.operationInput.value)
+      && state.sweepResume?.operation === els.operationInput.value
+      && Boolean(state.sweepResume?.canResume);
+    els.commandNote.textContent = showArrayResume
       ? `Ready. Suggested resume column ${state.arrayResume.colStart}.`
-      : "Ready";
+      : showSweepResume
+        ? `Ready. Resume ${state.sweepResume.operation} after ${state.sweepResume.completedPulses} completed pulses.`
+        : "Ready";
   }
-  const showResume = els.operationInput.value === "read-array" && Boolean(state.arrayResume?.canResume);
-  els.resumeColField.hidden = !showResume;
-  els.resumeColInput.disabled = !showResume;
-  if (showResume && document.activeElement !== els.resumeColInput) {
+  const showArrayResume = els.operationInput.value === "read-array" && Boolean(state.arrayResume?.canResume);
+  const showSweepResume = ["set", "reset"].includes(els.operationInput.value)
+    && state.sweepResume?.operation === els.operationInput.value
+    && Boolean(state.sweepResume?.canResume);
+  const showResume = showArrayResume || showSweepResume;
+  els.resumeColField.hidden = !showArrayResume;
+  els.resumeColInput.disabled = !showArrayResume;
+  if (showArrayResume && document.activeElement !== els.resumeColInput) {
     els.resumeColInput.value = String(state.arrayResume.colStart);
   }
   els.resumeArrayBtn.hidden = !showResume;
   els.resumeArrayBtn.disabled = !state.commandsEnabled || Boolean(running) || !showResume;
-  els.resumeArrayBtn.textContent = "Resume array";
+  els.resumeArrayBtn.textContent = showArrayResume ? "Resume array" : `Resume ${state.sweepResume?.operation || "sweep"}`;
 }
 
 async function sendCommand(payload, targetText, extraText = "") {
@@ -656,20 +666,37 @@ for (const eventName of ["input", "change"]) {
   els.currentMaxInput.addEventListener(eventName, () => setCurrentRange("max", els.currentMaxInput.value));
 }
 els.resumeArrayBtn.addEventListener("click", async () => {
-  if (els.operationInput.value !== "read-array" || !state.arrayResume?.canResume || !state.currentRunId) return;
-  const requestedCol = Number(els.resumeColInput.value);
-  const resumeCol = Number.isFinite(requestedCol) ? Math.max(0, Math.min(31, requestedCol)) : state.arrayResume.colStart;
-  await sendCommand(
-    {
-      operation: "read-array",
-      resumeRun: state.currentRunId,
-      resumeCol,
-      zynqPassword: els.zynqPasswordInput.value,
-      dryRun: els.dryRunInput.checked,
-    },
-    `remaining array columns starting at column ${resumeCol}`,
-    "\n\nThis will append to the selected unfinished run."
-  );
+  if (!state.currentRunId) return;
+  if (els.operationInput.value === "read-array" && state.arrayResume?.canResume) {
+    const requestedCol = Number(els.resumeColInput.value);
+    const resumeCol = Number.isFinite(requestedCol) ? Math.max(0, Math.min(31, requestedCol)) : state.arrayResume.colStart;
+    await sendCommand(
+      {
+        operation: "read-array",
+        resumeRun: state.currentRunId,
+        resumeCol,
+        zynqPassword: els.zynqPasswordInput.value,
+        dryRun: els.dryRunInput.checked,
+      },
+      `remaining array columns starting at column ${resumeCol}`,
+      "\n\nThis will append to the selected unfinished run."
+    );
+    return;
+  }
+  if (["set", "reset"].includes(els.operationInput.value) && state.sweepResume?.canResume) {
+    await sendCommand(
+      {
+        operation: els.operationInput.value,
+        resumeRun: state.currentRunId,
+        row: state.sweepResume.row,
+        col: state.sweepResume.col,
+        zynqPassword: els.zynqPasswordInput.value,
+        dryRun: els.dryRunInput.checked,
+      },
+      `row ${state.sweepResume.row}, col ${state.sweepResume.col}`,
+      "\n\nThis will append to the selected unfinished sweep and skip completed pulse voltages."
+    );
+  }
 });
 els.commandForm.addEventListener("submit", async (event) => {
   event.preventDefault();

@@ -332,6 +332,35 @@ def _array_resume_info(run_dir: Path, rows: list[dict[str, Any]]) -> dict[str, A
     }
 
 
+def _sweep_resume_info(run_dir: Path, rows: list[dict[str, Any]]) -> dict[str, Any]:
+    operation = "set" if run_dir.name.endswith("_set") else "reset" if run_dir.name.endswith("_reset") else ""
+    if not operation:
+        operations = [str(row.get("operation", "")) for row in rows]
+        if "set" in operations:
+            operation = "set"
+        elif "reset" in operations:
+            operation = "reset"
+    if operation not in {"set", "reset"}:
+        return {"isSweepRun": False, "canResume": False}
+    cell = next((row.get("cellAddress") for row in reversed(rows) if row.get("cellAddress")), None)
+    completed = [
+        row
+        for row in rows
+        if row.get("operation") == operation
+        and row.get("ok")
+        and row.get("cellAddress") == cell
+    ]
+    failed = _recent_log_events(run_dir)
+    return {
+        "isSweepRun": True,
+        "canResume": bool(cell) and bool(completed) and bool(failed),
+        "operation": operation,
+        "row": cell.get("row") if isinstance(cell, dict) else None,
+        "col": cell.get("col") if isinstance(cell, dict) else None,
+        "completedPulses": len(completed),
+    }
+
+
 def _latest_array_heatmap_cells(run_dir: Path) -> dict[str, dict[str, Any]]:
     latest_by_cell: dict[str, dict[str, Any]] = {}
     for manifest in sorted(run_dir.parent.glob("*/manifest.csv"), key=lambda path: _run_updated_at(path.parent)):
@@ -340,9 +369,12 @@ def _latest_array_heatmap_cells(run_dir: Path) -> dict[str, dict[str, Any]]:
         rows = _read_manifest(manifest)
         if not _array_resume_info(manifest.parent, rows).get("isArrayRun"):
             continue
+        is_baseline = len(rows) >= GRID_SIZE * 4
         for row in rows:
             cell = row.get("cellAddress")
             if not cell or not _is_read_row(row) or row.get("current_uA") is None:
+                continue
+            if not is_baseline and not row.get("ok"):
                 continue
             key = _cell_key(cell)
             if key not in latest_by_cell or row.get("ok"):
@@ -468,6 +500,7 @@ def _summarize(run_dir: Path, rows: list[dict[str, Any]]) -> dict[str, Any]:
         "progressEvents": progress_events,
         "activeError": active_error,
         "arrayResume": _array_resume_info(run_dir, rows),
+        "sweepResume": _sweep_resume_info(run_dir, rows),
     }
 
 
@@ -540,9 +573,10 @@ class GuiHandler(SimpleHTTPRequestHandler):
             self._send_json({"error": "A GUI command is already processing."}, HTTPStatus.CONFLICT)
             return
         resume_info: dict[str, Any] | None = None
+        sweep_resume_info: dict[str, Any] | None = None
         if resume_run:
-            if operation != "read-array":
-                self._send_json({"error": "Only read-array can resume a previous run."}, HTTPStatus.BAD_REQUEST)
+            if operation not in {"read-array", "set", "reset"}:
+                self._send_json({"error": "Only read-array, set, and reset can resume a previous run."}, HTTPStatus.BAD_REQUEST)
                 return
             run_dir = (self.config.runs_dir / resume_run).resolve()
             try:
@@ -551,15 +585,23 @@ class GuiHandler(SimpleHTTPRequestHandler):
                 self._send_json({"error": "Invalid resume run."}, HTTPStatus.BAD_REQUEST)
                 return
             rows = _read_manifest(_manifest_for_run(run_dir))
-            resume_info = _array_resume_info(run_dir, rows)
-            if not resume_info["canResume"]:
-                self._send_json({"error": "Selected run has no missing array columns to resume."}, HTTPStatus.BAD_REQUEST)
-                return
-            if resume_col is None:
-                resume_col = int(resume_info["colStart"])
-            if not 0 <= resume_col < GRID_SIZE:
-                self._send_json({"error": "Resume column must be 0..31."}, HTTPStatus.BAD_REQUEST)
-                return
+            if operation == "read-array":
+                resume_info = _array_resume_info(run_dir, rows)
+                if not resume_info["canResume"]:
+                    self._send_json({"error": "Selected run has no missing array columns to resume."}, HTTPStatus.BAD_REQUEST)
+                    return
+                if resume_col is None:
+                    resume_col = int(resume_info["colStart"])
+                if not 0 <= resume_col < GRID_SIZE:
+                    self._send_json({"error": "Resume column must be 0..31."}, HTTPStatus.BAD_REQUEST)
+                    return
+            else:
+                sweep_resume_info = _sweep_resume_info(run_dir, rows)
+                if not sweep_resume_info.get("canResume") or sweep_resume_info.get("operation") != operation:
+                    self._send_json({"error": f"Selected run cannot resume {operation}."}, HTTPStatus.BAD_REQUEST)
+                    return
+                row = int(sweep_resume_info.get("row", row))
+                col = int(sweep_resume_info.get("col", col))
         else:
             run_label = "array" if operation == "read-array" else f"r{row:02d}c{col:02d}"
             run_dir = ROOT / "api_v1" / "runs" / f"gui_{time.strftime('%Y%m%d_%H%M%S')}_{run_label}_{operation}"
@@ -580,7 +622,8 @@ class GuiHandler(SimpleHTTPRequestHandler):
         if dry_run:
             cmd.append("--dry-run")
             safe_cmd.append("--dry-run")
-        log_path = run_dir / ("gui_command.log" if not resume_info else f"gui_command_resume_{time.strftime('%Y%m%d_%H%M%S')}.log")
+        is_resume = bool(resume_info or sweep_resume_info)
+        log_path = run_dir / ("gui_command.log" if not is_resume else f"gui_command_resume_{time.strftime('%Y%m%d_%H%M%S')}.log")
         log_handle = log_path.open("w")
         proc = subprocess.Popen(cmd, cwd=str(ROOT), text=True, stdout=log_handle, stderr=subprocess.STDOUT, start_new_session=True)
         key = f"{int(time.time() * 1000)}"
@@ -588,7 +631,7 @@ class GuiHandler(SimpleHTTPRequestHandler):
             "proc": proc,
             "operation": operation,
             "arrayMode": array_mode if operation == "read-array" else "",
-            "resume": bool(resume_info),
+            "resume": is_resume,
             "row": row,
             "col": col,
             "runDir": str(run_dir.relative_to(ROOT)),
@@ -601,7 +644,7 @@ class GuiHandler(SimpleHTTPRequestHandler):
                 "id": key,
                 "runDir": str(run_dir.relative_to(ROOT)),
                 "command": safe_cmd,
-                "resume": resume_info,
+                "resume": resume_info or sweep_resume_info,
             }
         )
 

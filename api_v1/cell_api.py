@@ -158,6 +158,9 @@ class ScanDebugConfig:
     saleae_burst_capture_script: str = ".venv/bin/python run_full_array_burst_capture.py"
     saleae_restart_script: str = "./start-logic2-automation.sh"
     saleae_restart_wait_seconds: float = 10.0
+    saleae_usb_recovery_enabled: bool = True
+    saleae_usb_controller_pci: str = "0000:00:0c.0"
+    saleae_sudo_password: str | None = os.environ.get("SCAN_DEBUG_SALEAE_SUDO_PASSWORD") or None
     adc_dac_port: str = "/dev/serial/by-id/usb-Teensyduino_USB_Serial_8829000-if00"
     summarizer: Path = DEFAULT_SUMMARIZER
 
@@ -201,6 +204,18 @@ def packet_for_cell(cell: CellAddress, op_set: int) -> int:
     if op_set not in (0, 1):
         raise ValueError(f"op_set must be 0 or 1, got {op_set}")
     return (op_set << 15) | (cell.row << 10) | (cell.col << 5) | cell.row
+
+
+def cell_from_packet(packet: int, *, op_set: int = 0) -> CellAddress | None:
+    """Decode a scan packet back to its cell when it matches the hardware map."""
+
+    decoded_op_set = (packet >> 15) & 0x1
+    row = packet & 0x1F
+    col = (packet >> 5) & 0x1F
+    sl = (packet >> 10) & 0x1F
+    if decoded_op_set != op_set or sl != row:
+        return None
+    return CellAddress(row=row, col=col)
 
 
 def bits_lsb(packet: int) -> str:
@@ -337,6 +352,10 @@ class ScanDebugCellAPI:
             attempts = max(1, self.config.attempts)
             local_output_dir: Path | None = None
             remote_output_dir = ""
+            best_local_output_dir: Path | None = None
+            best_remote_output_dir = ""
+            best_valid_count = -1
+            best_validation_error = ""
             failures: list[str] = []
             for attempt in range(1, attempts + 1):
                 attempt_note = f" attempt {attempt}" if attempts > 1 else ""
@@ -357,10 +376,26 @@ class ScanDebugCellAPI:
                 local_output_dir = self._copy_capture(remote_output_dir, index, f"read_array_col{col:02d}_burst", self.config.read_rails)
                 self._append_progress("read-array", f"Column {col}: checking capture", cells=len(all_reads), total=total)
                 validation_error = self._validate_burst_manifest(local_output_dir, column_total)
+                valid_count = self._count_valid_burst_packets(local_output_dir)
+                if valid_count > best_valid_count:
+                    best_valid_count = valid_count
+                    best_local_output_dir = local_output_dir
+                    best_remote_output_dir = remote_output_dir
+                    best_validation_error = validation_error
                 if not validation_error:
                     break
                 failures.append(f"attempt={attempt} {validation_error}")
                 if attempt >= attempts:
+                    if best_local_output_dir is not None and best_valid_count > 0:
+                        local_output_dir = best_local_output_dir
+                        remote_output_dir = best_remote_output_dir
+                        self._append_progress(
+                            "read-array",
+                            f"Column {col}: keeping {best_valid_count}/{column_total} decoded cells; {best_validation_error}",
+                            cells=len(all_reads) + best_valid_count,
+                            total=total,
+                        )
+                        break
                     raise RuntimeError(
                         f"Column {col} capture failed validation after {attempts} attempts: {validation_error}; "
                         f"see {local_output_dir / 'manifest.csv'}"
@@ -478,8 +513,17 @@ class ScanDebugCellAPI:
         results: list[dict[str, object]] = []
         best: CellOperationResult | None = None
         target_hit = False
+        completed_rails = self._completed_sweep_rails(cell, operation)
         for vcc_set_v in sweep.vcc_set_v:
             for vcc_wl_set_v in sweep.vcc_wl_set_v:
+                if self._rail_key(vcc_set_v, vcc_wl_set_v) in completed_rails:
+                    self._append_progress(
+                        operation,
+                        f"Skipping completed {operation} pulse",
+                        vcc_set_V=vcc_set_v,
+                        vcc_wl_set_V=vcc_wl_set_v,
+                    )
+                    continue
                 rails = RailVoltages(vcc_set_v, vcc_wl_set_v)
                 pre_read: CellOperationResult | None = None
                 if operation in ("set", "reset"):
@@ -537,6 +581,26 @@ class ScanDebugCellAPI:
         }
         self._append_jsonl("cell_operations.jsonl", summary)
         return summary
+
+    def _completed_sweep_rails(self, cell: CellAddress, operation: Operation) -> set[tuple[float, float]]:
+        if operation not in ("set", "reset") or not self.manifest.exists():
+            return set()
+        completed: set[tuple[float, float]] = set()
+        with self.manifest.open(newline="") as handle:
+            for row in csv.DictReader(handle):
+                if row.get("operation") != operation or row.get("cell") != cell.label:
+                    continue
+                if str(row.get("ok", "")).lower() != "true":
+                    continue
+                vcc_set_v = self._float_or_none(row.get("vcc_set_V"))
+                vcc_wl_set_v = self._float_or_none(row.get("vcc_wl_set_V"))
+                if vcc_set_v is None or vcc_wl_set_v is None:
+                    continue
+                completed.add(self._rail_key(vcc_set_v, vcc_wl_set_v))
+        return completed
+
+    def _rail_key(self, vcc_set_v: float, vcc_wl_set_v: float) -> tuple[float, float]:
+        return (round(vcc_set_v, 6), round(vcc_wl_set_v, 6))
 
     def confirm_reads(
         self,
@@ -886,7 +950,17 @@ exit
             failures.append(reason)
             if attempt < attempts:
                 should_restart = timed_out or self._saleae_needs_restart(output or "")
-                if should_restart:
+                if self._usb_needs_recovery(output or ""):
+                    self._append_progress(
+                        "read-array",
+                        f"{burst_label.capitalize()}: recovering Ubuntu USB after attempt {attempt}",
+                        mode="burst",
+                        **progress_kwargs,
+                    )
+                    recovery_log = self._recover_saleae_usb(index, "read_array_burst", attempt)
+                    failures.append(f"usb_recovery_after_attempt={attempt} log={recovery_log}")
+                    restarted_saleae = True
+                elif should_restart:
                     self._append_progress(
                         "read-array",
                         f"{burst_label.capitalize()}: restarting capture service after attempt {attempt}",
@@ -922,42 +996,58 @@ exit
         burst_manifest = local_output_dir / "manifest.csv"
         if not burst_manifest.exists():
             raise RuntimeError(f"burst manifest missing: {burst_manifest}")
+        with burst_manifest.open(newline="") as handle:
+            rows = list(csv.DictReader(handle))
+        expected_packets = [int(str(row["packet"]), 16) for row in rows]
+        expected_packet_set = set(expected_packets)
+        rows_by_decoded_packet: dict[int, dict[str, str]] = {}
+        for row in rows:
+            decoded_text = str(row.get("decoded_packet", "")).strip()
+            if not decoded_text:
+                continue
+            decoded_packet = int(decoded_text, 16)
+            if decoded_packet in expected_packet_set and cell_from_packet(decoded_packet) is not None:
+                rows_by_decoded_packet[decoded_packet] = row
+
         reads: list[dict[str, object]] = []
         next_index = self._next_index()
-        with burst_manifest.open(newline="") as handle:
-            for offset, row in enumerate(csv.DictReader(handle)):
-                cell = CellAddress(int(row["row"]), int(row["col"]))
-                packet_text = str(row["packet"])
-                current = self._float_or_none(row.get("la_set_mean_uA"))
-                result = CellOperationResult(
-                    cell=cell,
-                    operation="read",
-                    packet=packet_text,
-                    rails=self.config.read_rails,
-                    current_uA=current,
-                    decoded_packet=str(row.get("decoded_packet", "")),
-                    ok=str(row.get("ok")) == "True",
-                    local_output_dir=str(local_output_dir),
-                    error=str(row.get("error", "")),
-                )
-                packet = int(packet_text, 16)
-                self._append_manifest(next_index + offset, "array_burst", "read", result, bitstream, bits_lsb(packet))
-                reads.append(
-                    {
-                        "cell": asdict(cell),
-                        "operation": "read",
-                        "packet": packet_text,
-                        "rails": asdict(self.config.read_rails),
-                        "current_uA": current,
-                        "decoded_packet": result.decoded_packet,
-                        "ok": result.ok,
-                        "local_output_dir": str(local_output_dir),
-                        "remote_output_dir": remote_output_dir,
-                        "error": result.error,
-                    }
-                )
-                if (offset + 1) % 64 == 0:
-                    self._append_progress("read-array", "Publishing burst reads", cells=offset + 1)
+        for offset, packet in enumerate(expected_packets):
+            row = rows_by_decoded_packet.get(packet)
+            if row is None:
+                continue
+            cell = cell_from_packet(packet)
+            if cell is None:
+                continue
+            packet_text = f"0x{packet:04x}"
+            current = self._float_or_none(row.get("la_set_mean_uA"))
+            result = CellOperationResult(
+                cell=cell,
+                operation="read",
+                packet=packet_text,
+                rails=self.config.read_rails,
+                current_uA=current,
+                decoded_packet=packet_text,
+                ok=True,
+                local_output_dir=str(local_output_dir),
+                error=str(row.get("error", "")),
+            )
+            self._append_manifest(next_index + offset, "array_burst", "read", result, bitstream, bits_lsb(packet))
+            reads.append(
+                {
+                    "cell": asdict(cell),
+                    "operation": "read",
+                    "packet": packet_text,
+                    "rails": asdict(self.config.read_rails),
+                    "current_uA": current,
+                    "decoded_packet": result.decoded_packet,
+                    "ok": result.ok,
+                    "local_output_dir": str(local_output_dir),
+                    "remote_output_dir": remote_output_dir,
+                    "error": result.error,
+                }
+            )
+            if (offset + 1) % 64 == 0:
+                self._append_progress("read-array", "Publishing burst reads", cells=offset + 1)
         return reads
 
     def _validate_burst_manifest(self, local_output_dir: Path, expected_count: int) -> str:
@@ -975,15 +1065,70 @@ exit
         ]
         if saleae_errors:
             return saleae_errors[0][:220]
-        bad_decodes = [row for row in rows if str(row.get("ok", "")).lower() != "true"]
-        if bad_decodes:
-            sample = bad_decodes[0]
-            return (
-                f"burst manifest has {len(bad_decodes)} decode mismatches; "
-                f"sample row={sample.get('row')} col={sample.get('col')} "
-                f"packet={sample.get('packet')} decoded={sample.get('decoded_packet')}"
-            )
+        try:
+            expected_packets = [int(str(row["packet"]), 16) for row in rows]
+        except (KeyError, TypeError, ValueError) as exc:
+            return f"burst manifest has invalid packet field: {exc}"
+
+        decoded_packets: list[int] = []
+        invalid_decodes: list[str] = []
+        for row in rows:
+            decoded_text = str(row.get("decoded_packet", "")).strip()
+            if not decoded_text:
+                continue
+            try:
+                decoded_packet = int(decoded_text, 16)
+            except ValueError:
+                invalid_decodes.append(decoded_text)
+                continue
+            if cell_from_packet(decoded_packet) is None:
+                invalid_decodes.append(decoded_text)
+                continue
+            decoded_packets.append(decoded_packet)
+        if invalid_decodes:
+            sample = ", ".join(invalid_decodes[:4])
+            return f"burst manifest has invalid decoded packets: {sample}"
+
+        expected_set = set(expected_packets)
+        decoded_set = set(decoded_packets)
+        missing = sorted(expected_set - decoded_set)
+        unexpected = sorted(decoded_set - expected_set)
+        duplicates = sorted(packet for packet in decoded_set if decoded_packets.count(packet) > 1)
+        if missing or unexpected or duplicates:
+            parts = []
+            if missing:
+                parts.append("missing decoded packets: " + ", ".join(f"0x{packet:04x}" for packet in missing[:8]))
+            if unexpected:
+                parts.append("unexpected decoded packets: " + ", ".join(f"0x{packet:04x}" for packet in unexpected[:8]))
+            if duplicates:
+                parts.append("duplicate decoded packets: " + ", ".join(f"0x{packet:04x}" for packet in duplicates[:8]))
+            return "burst manifest " + "; ".join(parts)
         return ""
+
+    def _count_valid_burst_packets(self, local_output_dir: Path) -> int:
+        burst_manifest = local_output_dir / "manifest.csv"
+        if not burst_manifest.exists():
+            return 0
+        with burst_manifest.open(newline="") as handle:
+            rows = list(csv.DictReader(handle))
+        expected_packets: set[int] = set()
+        for row in rows:
+            try:
+                expected_packets.add(int(str(row["packet"]), 16))
+            except (KeyError, TypeError, ValueError):
+                continue
+        decoded_packets: set[int] = set()
+        for row in rows:
+            decoded_text = str(row.get("decoded_packet", "")).strip()
+            if not decoded_text:
+                continue
+            try:
+                decoded_packet = int(decoded_text, 16)
+            except ValueError:
+                continue
+            if decoded_packet in expected_packets and cell_from_packet(decoded_packet) is not None:
+                decoded_packets.add(decoded_packet)
+        return len(decoded_packets)
 
     def _capture_remote(self, packet: int, rails: RailVoltages, bitstream: str, index: int, kind: str) -> str:
         env = {
@@ -1010,7 +1155,6 @@ exit
         capture_log = self.config.run_dir / f"capture_{index}_{kind}.log"
         attempts = max(1, self.config.attempts)
         failures: list[str] = []
-        restarted_saleae = False
         for attempt in range(1, attempts + 1):
             attempt_log = capture_log if attempts == 1 else self.config.run_dir / f"capture_{index}_{kind}_attempt{attempt}.log"
             capture_proc = self._popen_saleae(capture_cmd)
@@ -1031,15 +1175,33 @@ exit
                 f"attempt={attempt} capture_rc={capture_proc.returncode} program_rc={program_rc} "
                 f"remote_output_dir={remote_output_dir or '<missing>'} log={attempt_log}"
             )
+            if self._usb_needs_recovery(output or ""):
+                failures.append(f"attempt={attempt} usb_error={self._usb_error_summary(output or '')}")
+                recovery_log = self._recover_saleae_usb(index, kind, attempt)
+                failures.append(f"usb_recovery_after_attempt={attempt} log={recovery_log}")
+            elif self._saleae_needs_restart(output or ""):
+                failures.append(f"attempt={attempt} saleae_error={self._saleae_error_summary(output or '')}")
+                restart_log = self._restart_saleae_automation(index, kind, attempt)
+                failures.append(f"saleae_restart_after_attempt={attempt} log={restart_log}")
             if attempt < attempts:
-                if not restarted_saleae and self._saleae_needs_restart(output or ""):
-                    restart_log = self._restart_saleae_automation(index, kind, attempt)
-                    failures.append(f"saleae_restart_after_attempt={attempt} log={restart_log}")
-                    restarted_saleae = True
                 time.sleep(2.0)
 
         capture_log.write_text("\n".join(failures) + "\n")
         raise RuntimeError(f"capture/program failed index={index} kind={kind} after {attempts} attempts; see {capture_log}")
+
+    def _saleae_error_summary(self, output: str) -> str:
+        for line in reversed(output.splitlines()):
+            if "DeviceSetupFailure" in line:
+                return "DeviceSetupFailure"
+            if "Connection refused" in line:
+                return "Connection refused"
+            if "StatusCode.UNAVAILABLE" in line:
+                return "StatusCode.UNAVAILABLE"
+            if "_InactiveRpcError" in line:
+                return "_InactiveRpcError"
+            if "failed to connect to all addresses" in line:
+                return "failed to connect to all addresses"
+        return "restartable Saleae error"
 
     def _saleae_needs_restart(self, output: str) -> bool:
         restart_markers = (
@@ -1051,6 +1213,80 @@ exit
             "_InactiveRpcError",
         )
         return any(marker in output for marker in restart_markers)
+
+    def _usb_error_summary(self, output: str) -> str:
+        for line in reversed(output.splitlines()):
+            if self.config.adc_dac_port in line and "No such file or directory" in line:
+                return "ADC/DAC Teensy serial port missing"
+            if "LIBUSB_ERROR_BUSY" in line:
+                return "LIBUSB_ERROR_BUSY"
+            if "xHCI host controller not responding" in line or "HC died" in line:
+                return "xHCI controller died"
+            if "No Saleae device found" in line:
+                return "No Saleae device found"
+            if "DeviceError: Error interacting with device during capture: ReadTimeout" in line:
+                return "Saleae ReadTimeout"
+        return "recoverable USB error"
+
+    def _usb_needs_recovery(self, output: str) -> bool:
+        recovery_markers = (
+            f"could not open port {self.config.adc_dac_port}",
+            f"No such file or directory: '{self.config.adc_dac_port}'",
+            "/dev/serial/by-id",
+            "No Saleae device found",
+            "LIBUSB_ERROR_BUSY",
+            "xHCI host controller not responding",
+            "HC died; cleaning up",
+        )
+        return any(marker in output for marker in recovery_markers)
+
+    def _sudo_prefix(self) -> str:
+        if self.config.saleae_sudo_password:
+            return f"printf '%s\\n' {self._sh_quote(self.config.saleae_sudo_password)} | sudo -S"
+        return "sudo -n"
+
+    def _recover_saleae_usb(self, index: int, kind: str, attempt: int) -> Path:
+        recovery_log = self.config.run_dir / f"saleae_usb_recovery_{index}_{kind}_after_attempt{attempt}.log"
+        if not self.config.saleae_usb_recovery_enabled:
+            recovery_log.write_text("USB recovery disabled by config\n")
+            return recovery_log
+
+        sudo = self._sudo_prefix()
+        pci = self._sh_quote(self.config.saleae_usb_controller_pci)
+        script = f"""
+set -u
+echo "BEFORE_LSUSB"
+lsusb || true
+echo "BEFORE_SERIAL"
+ls -l /dev/serial/by-id/ 2>&1 || true
+echo "RESET_XHCI {self.config.saleae_usb_controller_pci}"
+{sudo} sh -c 'echo {pci} > /sys/bus/pci/drivers/xhci_hcd/unbind' || true
+sleep 3
+{sudo} sh -c 'echo {pci} > /sys/bus/pci/drivers/xhci_hcd/bind' || true
+sleep 8
+echo "AFTER_LSUSB"
+lsusb || true
+echo "AFTER_SERIAL"
+ls -l /dev/serial/by-id/ 2>&1 || true
+echo "RESTART_LOGIC"
+cd {self._sh_quote(self.config.saleae_dir)} && {self.config.saleae_restart_script}
+sleep {self.config.saleae_restart_wait_seconds}
+echo "PORT_10430"
+ss -ltnp 2>/dev/null | grep 10430 || true
+echo "SALEAE_AUTOMATION_TEST"
+.venv/bin/python - <<'PY' || true
+from saleae import automation
+with automation.Manager.connect(port=10430, connect_timeout_seconds=5) as manager:
+    print(manager.get_app_info())
+    print([(d.device_type, d.device_id) for d in manager.get_devices()])
+PY
+"""
+        if self.config.saleae_host:
+            proc = self.runner.ssh(self.config.saleae_host, script, timeout_s=90)
+        else:
+            proc = self.runner.run(self._local_shell_command(script), timeout_s=90)
+        recovery_log.write_text(proc.stdout or "")
+        return recovery_log
 
     def _restart_saleae_automation(self, index: int, kind: str, attempt: int) -> Path:
         restart_log = self.config.run_dir / f"saleae_restart_{index}_{kind}_after_attempt{attempt}.log"

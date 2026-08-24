@@ -43,6 +43,9 @@ def build_config(args: argparse.Namespace) -> ScanDebugConfig:
         saleae_dir=args.saleae_dir,
         saleae_restart_script=args.saleae_restart_script,
         saleae_restart_wait_seconds=args.saleae_restart_wait_seconds,
+        saleae_usb_recovery_enabled=not args.disable_saleae_usb_recovery,
+        saleae_usb_controller_pci=args.saleae_usb_controller_pci,
+        saleae_sudo_password=args.saleae_sudo_password or None,
         adc_dac_port=args.adc_dac_port,
         burst_initial_delay_cycles=args.burst_initial_delay_cycles,
         burst_repeat_after_done_cycles=args.burst_repeat_cycles,
@@ -99,6 +102,9 @@ def main() -> int:
     parser.add_argument("--saleae-dir", default=os.environ.get("SCAN_DEBUG_SALEAE_DIR", "/home/ubuntu-24-04/saleae-api"))
     parser.add_argument("--saleae-restart-script", default=os.environ.get("SCAN_DEBUG_SALEAE_RESTART_SCRIPT", "./start-logic2-automation.sh"))
     parser.add_argument("--saleae-restart-wait-seconds", type=float, default=float(os.environ.get("SCAN_DEBUG_SALEAE_RESTART_WAIT_SECONDS", "10")))
+    parser.add_argument("--disable-saleae-usb-recovery", action="store_true", default=os.environ.get("SCAN_DEBUG_DISABLE_SALEAE_USB_RECOVERY", "0") == "1")
+    parser.add_argument("--saleae-usb-controller-pci", default=os.environ.get("SCAN_DEBUG_SALEAE_USB_CONTROLLER_PCI", "0000:00:0c.0"))
+    parser.add_argument("--saleae-sudo-password", default=os.environ.get("SCAN_DEBUG_SALEAE_SUDO_PASSWORD", ""))
     parser.add_argument("--burst-initial-delay-cycles", type=int, default=int(os.environ.get("SCAN_DEBUG_BURST_INITIAL_DELAY_CYCLES", "40000000")))
     parser.add_argument("--burst-repeat-cycles", type=int, default=int(os.environ.get("SCAN_DEBUG_BURST_REPEAT_CYCLES", "10000000")))
     parser.add_argument(

@@ -249,6 +249,9 @@ The CLI reads these environment variables when matching command-line flags are n
 | `SCAN_DEBUG_SALEAE_DIR` | `--saleae-dir` | `/home/ubuntu-24-04/saleae-api` |
 | `SCAN_DEBUG_SALEAE_RESTART_SCRIPT` | `--saleae-restart-script` | `./start-logic2-automation.sh` |
 | `SCAN_DEBUG_SALEAE_RESTART_WAIT_SECONDS` | `--saleae-restart-wait-seconds` | `10` |
+| `SCAN_DEBUG_DISABLE_SALEAE_USB_RECOVERY` | `--disable-saleae-usb-recovery` | `0` |
+| `SCAN_DEBUG_SALEAE_USB_CONTROLLER_PCI` | `--saleae-usb-controller-pci` | `0000:00:0c.0` |
+| `SCAN_DEBUG_SALEAE_SUDO_PASSWORD` | `--saleae-sudo-password` | empty |
 | `SCAN_DEBUG_ADC_DAC_PORT` | `--adc-dac-port` | `/dev/serial/by-id/usb-Teensyduino_USB_Serial_8829000-if00` |
 
 macOS/Linux example:
@@ -311,6 +314,16 @@ If a new PC cannot run the API against hardware, check in this order:
 
    ```bash
    ssh ubuntu-24-04@100.98.132.51 'ls -l /dev/serial/by-id/ | grep Teensy || true'
+   ```
+
+   If all USB devices disappear from Ubuntu while VirtualBox still shows passthrough,
+   the guest xHCI controller may have wedged. Capture retries automatically reset the
+   configured xHCI PCI device, restart Logic 2 automation, and retry when logs show a
+   missing Teensy serial path, missing Saleae, `LIBUSB_ERROR_BUSY`, or xHCI failure.
+   For password-based sudo recovery from the GUI, launch the GUI/API with:
+
+   ```bash
+   export SCAN_DEBUG_SALEAE_SUDO_PASSWORD='<ubuntu-sudo-password>'
    ```
 
 6. Is Vivado/JTAG working on the Zynq PC?

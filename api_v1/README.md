@@ -253,6 +253,12 @@ The CLI reads these environment variables when matching command-line flags are n
 | `SCAN_DEBUG_SALEAE_USB_CONTROLLER_PCI` | `--saleae-usb-controller-pci` | `0000:00:0c.0` |
 | `SCAN_DEBUG_SALEAE_SUDO_PASSWORD` | `--saleae-sudo-password` | empty |
 | `SCAN_DEBUG_ADC_DAC_PORT` | `--adc-dac-port` | `/dev/serial/by-id/usb-Teensyduino_USB_Serial_8829000-if00` |
+| `SCAN_DEBUG_DISABLE_DAC_TEENSY_REFLASH` | `--disable-dac-teensy-reflash` | `0` |
+| `SCAN_DEBUG_DAC_TEENSY_APP_SERIAL` | `--dac-teensy-app-serial` | `8829000` |
+| `SCAN_DEBUG_DAC_TEENSY_BOOTLOADER_SERIAL` | `--dac-teensy-bootloader-serial` | `000D78D4` |
+| `SCAN_DEBUG_DAC_TEENSY_LOADER` | `--dac-teensy-loader` | `/home/ubuntu-24-04/teensy-tools-src/teensy_loader_cli_serial/teensy_loader_cli` |
+| `SCAN_DEBUG_DAC_TEENSY_MCU` | `--dac-teensy-mcu` | `TEENSY41` |
+| `SCAN_DEBUG_DAC_TEENSY_HEX` | `--dac-teensy-hex` | `/home/ubuntu-24-04/teensy-flash/build-DAC_analog_vltgs/DAC_analog_vltgs.ino.hex` |
 
 macOS/Linux example:
 
@@ -325,6 +331,13 @@ If a new PC cannot run the API against hardware, check in this order:
    ```bash
    export SCAN_DEBUG_SALEAE_SUDO_PASSWORD='<ubuntu-sudo-password>'
    ```
+
+   If the DAC/ADC Teensy is still visible but rail writes fail with
+   `SerialTimeoutException: Write timeout`, the API treats the DAC Teensy firmware or
+   CDC endpoint as wedged. It reflashes only the DAC Teensy by matching app serial
+   `8829000` and bootloader serial `000D78D4`, runs a two-command rail smoke test,
+   and retries the capture. This is separate from the xHCI recovery above because the
+   USB device can be present while serial writes are still broken.
 
 6. Is Vivado/JTAG working on the Zynq PC?
 

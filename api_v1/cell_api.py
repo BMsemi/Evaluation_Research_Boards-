@@ -111,7 +111,7 @@ class ScanDebugConfig:
     read_rails: RailVoltages = field(default_factory=lambda: RailVoltages(1.0, 2.5))
     set_sweep: SweepConfig = field(
         default_factory=lambda: SweepConfig.from_ranges(
-            vcc_set_v=(1.6, 2.0, 2.3, 2.4, 2.5, 2.8),
+            vcc_set_v=(1.6, 2.0, 2.3, 2.4, 2.5, 2.8, 3.0),
             vcc_wl_set_v=(
                 0.5,
                 0.6,
@@ -162,6 +162,12 @@ class ScanDebugConfig:
     saleae_usb_controller_pci: str = "0000:00:0c.0"
     saleae_sudo_password: str | None = os.environ.get("SCAN_DEBUG_SALEAE_SUDO_PASSWORD") or None
     adc_dac_port: str = "/dev/serial/by-id/usb-Teensyduino_USB_Serial_8829000-if00"
+    dac_teensy_reflash_enabled: bool = True
+    dac_teensy_app_serial: str = "8829000"
+    dac_teensy_bootloader_serial: str = "000D78D4"
+    dac_teensy_loader: str = "/home/ubuntu-24-04/teensy-tools-src/teensy_loader_cli_serial/teensy_loader_cli"
+    dac_teensy_mcu: str = "TEENSY41"
+    dac_teensy_hex: str = "/home/ubuntu-24-04/teensy-flash/build-DAC_analog_vltgs/DAC_analog_vltgs.ino.hex"
     summarizer: Path = DEFAULT_SUMMARIZER
 
     digital_sample_rate: int = 50_000_000
@@ -906,7 +912,9 @@ exit
         env_text = " ".join(f"{k}={self._sh_quote(v)}" for k, v in env.items())
         capture_cmd = f"env {env_text} {self.config.saleae_burst_capture_script}"
         capture_log = self.config.run_dir / f"capture_{index}_read_array_burst.log"
-        attempts = max(1, self.config.attempts)
+        # One extra slot lets an automatic recovery action (USB reset, Logic restart,
+        # DAC Teensy reflash) happen on the last configured attempt and still retry.
+        attempts = max(1, self.config.attempts) + 1
         failures: list[str] = []
         restarted_saleae = False
         progress_kwargs = {
@@ -950,7 +958,16 @@ exit
             failures.append(reason)
             if attempt < attempts:
                 should_restart = timed_out or self._saleae_needs_restart(output or "")
-                if self._usb_needs_recovery(output or ""):
+                if self._dac_teensy_needs_reflash(output or ""):
+                    self._append_progress(
+                        "read-array",
+                        f"{burst_label.capitalize()}: reflashing DAC Teensy after serial write timeout",
+                        mode="burst",
+                        **progress_kwargs,
+                    )
+                    reflash_log = self._reflash_dac_teensy(index, "read_array_burst", attempt)
+                    failures.append(f"dac_teensy_reflash_after_attempt={attempt} log={reflash_log}")
+                elif self._usb_needs_recovery(output or ""):
                     self._append_progress(
                         "read-array",
                         f"{burst_label.capitalize()}: recovering Ubuntu USB after attempt {attempt}",
@@ -1153,7 +1170,9 @@ exit
         env_text = " ".join(f"{k}={self._sh_quote(v)}" for k, v in env.items())
         capture_cmd = f"cd {self.config.saleae_dir} && env {env_text} {self.config.saleae_capture_script}"
         capture_log = self.config.run_dir / f"capture_{index}_{kind}.log"
-        attempts = max(1, self.config.attempts)
+        # One extra slot lets an automatic recovery action (USB reset, Logic restart,
+        # DAC Teensy reflash) happen on the last configured attempt and still retry.
+        attempts = max(1, self.config.attempts) + 1
         failures: list[str] = []
         for attempt in range(1, attempts + 1):
             attempt_log = capture_log if attempts == 1 else self.config.run_dir / f"capture_{index}_{kind}_attempt{attempt}.log"
@@ -1175,7 +1194,11 @@ exit
                 f"attempt={attempt} capture_rc={capture_proc.returncode} program_rc={program_rc} "
                 f"remote_output_dir={remote_output_dir or '<missing>'} log={attempt_log}"
             )
-            if self._usb_needs_recovery(output or ""):
+            if self._dac_teensy_needs_reflash(output or ""):
+                failures.append(f"attempt={attempt} dac_teensy_error=Serial write timeout")
+                reflash_log = self._reflash_dac_teensy(index, kind, attempt)
+                failures.append(f"dac_teensy_reflash_after_attempt={attempt} log={reflash_log}")
+            elif self._usb_needs_recovery(output or ""):
                 failures.append(f"attempt={attempt} usb_error={self._usb_error_summary(output or '')}")
                 recovery_log = self._recover_saleae_usb(index, kind, attempt)
                 failures.append(f"usb_recovery_after_attempt={attempt} log={recovery_log}")
@@ -1240,6 +1263,13 @@ exit
         )
         return any(marker in output for marker in recovery_markers)
 
+    def _dac_teensy_needs_reflash(self, output: str) -> bool:
+        return (
+            "SerialTimeoutException" in output
+            and "Write timeout" in output
+            and ("set_scan_set_rails" in output or "SCAN_RAIL_COMMAND" in output or "SCAN_CUSTOM_RAILS" in output)
+        )
+
     def _sudo_prefix(self) -> str:
         if self.config.saleae_sudo_password:
             return f"printf '%s\\n' {self._sh_quote(self.config.saleae_sudo_password)} | sudo -S"
@@ -1287,6 +1317,54 @@ PY
             proc = self.runner.run(self._local_shell_command(script), timeout_s=90)
         recovery_log.write_text(proc.stdout or "")
         return recovery_log
+
+    def _reflash_dac_teensy(self, index: int, kind: str, attempt: int) -> Path:
+        reflash_log = self.config.run_dir / f"dac_teensy_reflash_{index}_{kind}_after_attempt{attempt}.log"
+        if not self.config.dac_teensy_reflash_enabled:
+            reflash_log.write_text("DAC Teensy reflash disabled by config\n")
+            return reflash_log
+
+        loader = self._sh_quote(self.config.dac_teensy_loader)
+        hex_path = self._sh_quote(self.config.dac_teensy_hex)
+        mcu = self._sh_quote(self.config.dac_teensy_mcu)
+        app_serial = self._sh_quote(self.config.dac_teensy_app_serial)
+        boot_serial = self._sh_quote(self.config.dac_teensy_bootloader_serial)
+        port = self._sh_quote(self.config.adc_dac_port)
+        script = f"""
+set -u
+echo "BEFORE_SERIAL"
+ls -l /dev/serial/by-id/ 2>&1 || true
+echo "KILL_STALE_ACM_HOLDERS"
+fuser -k {port} 2>/dev/null || true
+sleep 1
+echo "REFLASH_DAC_TEENSY app={self.config.dac_teensy_app_serial} boot={self.config.dac_teensy_bootloader_serial}"
+TEENSY_LOADER_SERIAL={app_serial} TEENSY_LOADER_SERIAL_ALT={boot_serial} \\
+  {loader} --mcu={mcu} -s -w -v {hex_path}
+sleep 5
+echo "AFTER_SERIAL"
+ls -l /dev/serial/by-id/ 2>&1 || true
+echo "DAC_TEENSY_SMOKE"
+python3 - <<'PY' || true
+import serial, time
+port = {self.config.adc_dac_port!r}
+for command in ("SCAN_CUSTOM_RAILS 1000 2500", "SCAN_CUSTOM_RAILS 0 0"):
+    s = serial.Serial(port, 115200, timeout=1, write_timeout=3)
+    time.sleep(0.8)
+    s.reset_input_buffer()
+    s.reset_output_buffer()
+    s.write((command + "\\n").encode())
+    s.flush()
+    time.sleep(0.8)
+    print(command, "=>", s.read(s.in_waiting or 200).decode(errors="replace").strip())
+    s.close()
+PY
+"""
+        if self.config.saleae_host:
+            proc = self.runner.ssh(self.config.saleae_host, script, timeout_s=90)
+        else:
+            proc = self.runner.run(self._local_shell_command(script), timeout_s=90)
+        reflash_log.write_text(proc.stdout or "")
+        return reflash_log
 
     def _restart_saleae_automation(self, index: int, kind: str, attempt: int) -> Path:
         restart_log = self.config.run_dir / f"saleae_restart_{index}_{kind}_after_attempt{attempt}.log"

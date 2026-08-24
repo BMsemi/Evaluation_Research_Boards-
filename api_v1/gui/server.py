@@ -350,10 +350,9 @@ def _sweep_resume_info(run_dir: Path, rows: list[dict[str, Any]]) -> dict[str, A
         and row.get("ok")
         and row.get("cellAddress") == cell
     ]
-    failed = _recent_log_events(run_dir)
     return {
         "isSweepRun": True,
-        "canResume": bool(cell) and bool(completed) and bool(failed),
+        "canResume": bool(cell) and bool(completed),
         "operation": operation,
         "row": cell.get("row") if isinstance(cell, dict) else None,
         "col": cell.get("col") if isinstance(cell, dict) else None,
@@ -513,6 +512,12 @@ class GuiHandler(SimpleHTTPRequestHandler):
 
     def log_message(self, fmt: str, *args: Any) -> None:
         sys.stderr.write("[%s] %s\n" % (time.strftime("%H:%M:%S"), fmt % args))
+
+    def end_headers(self) -> None:
+        self.send_header("Cache-Control", "no-store, max-age=0")
+        self.send_header("Pragma", "no-cache")
+        self.send_header("Expires", "0")
+        super().end_headers()
 
     def do_GET(self) -> None:
         parsed = urlparse(self.path)

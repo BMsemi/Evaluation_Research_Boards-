@@ -47,6 +47,12 @@ def build_config(args: argparse.Namespace) -> ScanDebugConfig:
         saleae_usb_controller_pci=args.saleae_usb_controller_pci,
         saleae_sudo_password=args.saleae_sudo_password or None,
         adc_dac_port=args.adc_dac_port,
+        dac_teensy_reflash_enabled=not args.disable_dac_teensy_reflash,
+        dac_teensy_app_serial=args.dac_teensy_app_serial,
+        dac_teensy_bootloader_serial=args.dac_teensy_bootloader_serial,
+        dac_teensy_loader=args.dac_teensy_loader,
+        dac_teensy_mcu=args.dac_teensy_mcu,
+        dac_teensy_hex=args.dac_teensy_hex,
         burst_initial_delay_cycles=args.burst_initial_delay_cycles,
         burst_repeat_after_done_cycles=args.burst_repeat_cycles,
         burst_capture_timeout_seconds=args.burst_capture_timeout_seconds,
@@ -86,7 +92,7 @@ def main() -> int:
 
     parser.add_argument("--read-vcc-set", type=float, default=1.0)
     parser.add_argument("--read-vcc-wl-set", type=float, default=2.5)
-    parser.add_argument("--set-vcc-set", default="1.6,2.0,2.3,2.4,2.5,2.8")
+    parser.add_argument("--set-vcc-set", default="1.6,2.0,2.3,2.4,2.5,2.8,3.0")
     parser.add_argument("--set-vcc-wl-set", default="0.5,0.6,0.7,0.8,0.9,1.0,1.1,1.2,1.3,1.4,1.5,1.6,1.7,1.8,1.9,2.0")
     parser.add_argument("--reset-vcc-set", default="3.3,3.4,3.5,3.6,3.7")
     parser.add_argument("--reset-vcc-wl-set", default="1.0,1.2,1.4,1.6,1.8,2.0,2.2,2.3")
@@ -116,6 +122,12 @@ def main() -> int:
         "--adc-dac-port",
         default=os.environ.get("SCAN_DEBUG_ADC_DAC_PORT", "/dev/serial/by-id/usb-Teensyduino_USB_Serial_8829000-if00"),
     )
+    parser.add_argument("--disable-dac-teensy-reflash", action="store_true", default=os.environ.get("SCAN_DEBUG_DISABLE_DAC_TEENSY_REFLASH", "0") == "1")
+    parser.add_argument("--dac-teensy-app-serial", default=os.environ.get("SCAN_DEBUG_DAC_TEENSY_APP_SERIAL", "8829000"))
+    parser.add_argument("--dac-teensy-bootloader-serial", default=os.environ.get("SCAN_DEBUG_DAC_TEENSY_BOOTLOADER_SERIAL", "000D78D4"))
+    parser.add_argument("--dac-teensy-loader", default=os.environ.get("SCAN_DEBUG_DAC_TEENSY_LOADER", "/home/ubuntu-24-04/teensy-tools-src/teensy_loader_cli_serial/teensy_loader_cli"))
+    parser.add_argument("--dac-teensy-mcu", default=os.environ.get("SCAN_DEBUG_DAC_TEENSY_MCU", "TEENSY41"))
+    parser.add_argument("--dac-teensy-hex", default=os.environ.get("SCAN_DEBUG_DAC_TEENSY_HEX", "/home/ubuntu-24-04/teensy-flash/build-DAC_analog_vltgs/DAC_analog_vltgs.ino.hex"))
     args = parser.parse_args()
     if args.operation not in {"read-array", "build-array-bitstreams"} and args.row is None:
         parser.error("--row is required unless operation is read-array or build-array-bitstreams")

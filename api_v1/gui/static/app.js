@@ -562,7 +562,12 @@ function renderCommandState(commands) {
   const running = commands.find((command) => command.running);
   state.runningCommandId = running?.id || "";
   els.commandBtn.disabled = !state.commandsEnabled || Boolean(running);
-  els.commandBtn.textContent = running ? "Processing..." : "Start";
+  const canContinueSelectedSweep = !running
+    && state.manualRun
+    && ["set", "reset"].includes(els.operationInput.value)
+    && state.sweepResume?.operation === els.operationInput.value
+    && Boolean(state.sweepResume?.canResume);
+  els.commandBtn.textContent = running ? "Processing..." : canContinueSelectedSweep ? "Continue" : "Start";
   els.killBtn.disabled = !running || !running.canKill;
   if (!state.commandsEnabled) {
     els.commandNote.textContent = "--allow-commands";
@@ -586,7 +591,7 @@ function renderCommandState(commands) {
     els.commandNote.textContent = showArrayResume
       ? `Ready. Suggested resume column ${state.arrayResume.colStart}.`
       : showSweepResume
-        ? `Ready. Resume ${state.sweepResume.operation} after ${state.sweepResume.completedPulses} completed pulses.`
+        ? `Ready. Continue ${state.sweepResume.operation} after ${state.sweepResume.completedPulses} completed pulses.`
         : "Ready";
   }
   const showArrayResume = els.operationInput.value === "read-array" && Boolean(state.arrayResume?.canResume);
@@ -707,8 +712,21 @@ els.commandForm.addEventListener("submit", async (event) => {
     zynqPassword: els.zynqPasswordInput.value,
     dryRun: els.dryRunInput.checked,
   };
+  const continueSelectedSweep = state.manualRun
+    && ["set", "reset"].includes(payload.operation)
+    && state.sweepResume?.operation === payload.operation
+    && Boolean(state.sweepResume?.canResume);
+  if (continueSelectedSweep) {
+    payload.resumeRun = state.currentRunId;
+    payload.row = state.sweepResume.row;
+    payload.col = state.sweepResume.col;
+  }
   const target = payload.operation === "read-array" ? `the array starting at column ${payload.col}` : `row ${payload.row}, col ${payload.col}`;
-  const extra = payload.operation === "read-array" ? "\n\nThis will read columns from the selected start column through column 31." : "";
+  const extra = payload.operation === "read-array"
+    ? "\n\nThis will read columns from the selected start column through column 31."
+    : continueSelectedSweep
+      ? "\n\nThis will append to the selected run and skip pulse voltages already completed in its manifest."
+      : "";
   await sendCommand(payload, target, extra);
 });
 

@@ -258,7 +258,7 @@ class CommandRunner:
             text = f"DRY_RUN ssh {host} {command}\n"
             return subprocess.CompletedProcess(["ssh", host, command], 0, text, "")
         if platform.system().lower().startswith("win"):
-            raise RuntimeError("password SSH automation on Windows needs SSH keys or an external tool; use --zynq-host with key auth")
+            return self._ssh_with_paramiko_password(host, password, command, timeout_s=timeout_s)
         if shutil.which("expect") is None:
             raise RuntimeError("expect is required for password SSH automation on this platform; use SSH keys or install expect")
         script = f"""
@@ -273,6 +273,58 @@ exit [lindex $result 3]
 """
         proc = subprocess.run(["expect", "-c", script], text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         return subprocess.CompletedProcess(["ssh", host, command], proc.returncode, proc.stdout, "")
+
+    @staticmethod
+    def _ssh_with_paramiko_password(
+        host: str,
+        password: str,
+        command: str,
+        *,
+        timeout_s: int | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        try:
+            import paramiko
+        except ImportError as exc:
+            raise RuntimeError(
+                "password SSH automation on Windows requires Paramiko; "
+                "install it with: python -m pip install -r api_v1/requirements.txt"
+            ) from exc
+
+        username, separator, hostname = host.rpartition("@")
+        if not separator or not username or not hostname:
+            raise RuntimeError("password SSH host must use the user@hostname form")
+
+        client = paramiko.SSHClient()
+        client.load_system_host_keys()
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        try:
+            client.connect(
+                hostname=hostname,
+                username=username,
+                password=password,
+                timeout=timeout_s,
+                banner_timeout=timeout_s,
+                auth_timeout=timeout_s,
+                allow_agent=False,
+                look_for_keys=False,
+            )
+            transport = client.get_transport()
+            if transport is None or not transport.is_active():
+                raise RuntimeError(f"SSH connection to {host} did not become active")
+            channel = transport.open_session(timeout=timeout_s)
+            try:
+                channel.set_combine_stderr(True)
+                if timeout_s is not None:
+                    channel.settimeout(timeout_s)
+                channel.exec_command(command)
+                raw_output = channel.makefile("rb", -1).read()
+                output = raw_output.decode("utf-8", errors="replace")
+                returncode = channel.recv_exit_status()
+            finally:
+                channel.close()
+        finally:
+            client.close()
+        return subprocess.CompletedProcess(["ssh", host, command], returncode, output, "")
 
 
 class ScanDebugCellAPI:
@@ -1405,7 +1457,15 @@ PY
         if local.exists():
             shutil.rmtree(local)
         if self.config.saleae_host:
-            proc = self.runner.run(["rsync", "-a", f"{self.config.saleae_host}:{remote_output_dir}/", f"{local}/"])
+            rsync = shutil.which("rsync")
+            if rsync:
+                proc = self.runner.run([rsync, "-a", f"{self.config.saleae_host}:{remote_output_dir}/", f"{local}/"])
+            else:
+                scp = shutil.which("scp")
+                if not scp:
+                    raise RuntimeError("copying a remote Saleae capture requires rsync or scp on PATH")
+                local.mkdir(parents=True)
+                proc = self.runner.run([scp, "-r", f"{self.config.saleae_host}:{remote_output_dir}/.", str(local)])
             if proc.returncode != 0:
                 raise RuntimeError(proc.stdout)
         else:

@@ -163,9 +163,10 @@ Use this when the user has a fresh remote PC and does not know the lab network s
    ssh ubuntu-24-04@100.98.132.51
    ```
 
-   Recommended: configure SSH keys. Password mode is less reliable for automation, especially on Windows.
+   Recommended: configure SSH keys. Password mode requires `expect` on Ubuntu/macOS
+   and Paramiko on Windows.
 
-   On Ubuntu/macOS, password automation for the Zynq host can be used with a command-line flag:
+   Password automation for the Zynq host can be used with a command-line flag:
 
    ```bash
    --zynq-password <zynq-password>
@@ -183,7 +184,11 @@ Use this when the user has a fresh remote PC and does not know the lab network s
    python api_v1/scan_debug_cli.py read --row 1 --col 0
    ```
 
-   On Windows, use SSH keys instead of `--zynq-password`.
+   On Windows, install the API dependency before using `--zynq-password`:
+
+   ```powershell
+   python -m pip install -r api_v1/requirements.txt
+   ```
 
 4. Clone this API repo on the API runner PC.
 
@@ -220,7 +225,7 @@ Use this when the user has a fresh remote PC and does not know the lab network s
 
 7. Run a hardware read only after the network and hosts are verified.
 
-   Ubuntu/macOS example with Zynq password automation:
+   Zynq password automation example:
 
    ```bash
    python api_v1/scan_debug_cli.py read --row 1 --col 0 --zynq-password <zynq-password>
@@ -418,7 +423,8 @@ The API itself is pure Python and runs on macOS, Ubuntu, or Windows. Hardware ac
 - For Windows Zynq programming, the remote side uses PowerShell plus Vivado.
 - For Ubuntu/local Zynq programming, set `--zynq-os posix`.
 - Prefer SSH keys or an existing SSH agent.
-- On Ubuntu/macOS only, `--zynq-password ...` can use `expect` for the Windows Zynq host. On Windows, use SSH keys.
+- `--zynq-password ...` uses `expect` on Ubuntu/macOS and Paramiko on Windows. SSH keys remain recommended.
+- Remote Saleae captures use `rsync` when it is on `PATH`, with an automatic `scp` fallback (including Windows OpenSSH).
 
 ## Required Files
 

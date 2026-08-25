@@ -5,6 +5,7 @@ import argparse
 import csv
 import json
 import os
+import platform
 import re
 import signal
 import shlex
@@ -217,9 +218,8 @@ def _active_error(run_dir: Path, rows: list[dict[str, Any]], log_events: list[di
     if not log_events:
         return None
     last_log_error = log_events[-1]
-    last_row_order = float(rows[-1].get("eventOrder") or -1) if rows else -1
-    last_error_order = float(last_log_error.get("eventOrder") or -1)
-    if rows and rows[-1].get("ok") and last_row_order > last_error_order:
+    last_error_updated = float(last_log_error.get("updated") or -1)
+    if rows and rows[-1].get("ok") and _latest_manifest_mtime(run_dir) > last_error_updated:
         return None
     return last_log_error
 
@@ -282,6 +282,18 @@ def _active_capture_rails(parent_pid: int) -> dict[str, float]:
                 "activeVccWlSet_V": float(match.group(2)) / 1000,
             }
     return {}
+
+
+def _terminate_windows_process_tree(pid: int) -> None:
+    proc = subprocess.run(
+        ["taskkill", "/PID", str(pid), "/T", "/F"],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    )
+    if proc.returncode != 0:
+        message = (proc.stdout or "").strip() or f"taskkill failed with exit code {proc.returncode}"
+        raise OSError(message)
 
 
 def _run_choices(runs_dir: Path) -> list[dict[str, Any]]:
@@ -612,6 +624,7 @@ class GuiHandler(SimpleHTTPRequestHandler):
             run_dir = ROOT / "api_v1" / "runs" / f"gui_{time.strftime('%Y%m%d_%H%M%S')}_{run_label}_{operation}"
             run_dir.mkdir(parents=True, exist_ok=True)
         cmd = [sys.executable, str(ROOT / "api_v1" / "scan_debug_cli.py"), operation, "--run-dir", str(run_dir)]
+        command_env = os.environ.copy()
         if operation != "read-array":
             cmd.extend(["--row", str(row), "--col", str(col)])
         else:
@@ -622,15 +635,23 @@ class GuiHandler(SimpleHTTPRequestHandler):
                 cmd.extend(["--col-start", str(col)])
         safe_cmd = list(cmd)
         if zynq_password:
-            cmd.extend(["--zynq-password", zynq_password])
-            safe_cmd.extend(["--zynq-password", "<redacted>"])
+            command_env["SCAN_DEBUG_ZYNQ_PASSWORD"] = zynq_password
+            safe_cmd.extend(["--zynq-password", "<provided via environment>"])
         if dry_run:
             cmd.append("--dry-run")
             safe_cmd.append("--dry-run")
         is_resume = bool(resume_info or sweep_resume_info)
         log_path = run_dir / ("gui_command.log" if not is_resume else f"gui_command_resume_{time.strftime('%Y%m%d_%H%M%S')}.log")
         log_handle = log_path.open("w")
-        proc = subprocess.Popen(cmd, cwd=str(ROOT), text=True, stdout=log_handle, stderr=subprocess.STDOUT, start_new_session=True)
+        proc = subprocess.Popen(
+            cmd,
+            cwd=str(ROOT),
+            env=command_env,
+            text=True,
+            stdout=log_handle,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
         key = f"{int(time.time() * 1000)}"
         self.running_commands[key] = {
             "proc": proc,
@@ -725,21 +746,30 @@ class GuiHandler(SimpleHTTPRequestHandler):
                 self._send_json({"error": "Command already finished."}, HTTPStatus.CONFLICT)
                 return
             try:
-                os.killpg(proc.pid, signal.SIGTERM)
-            except OSError:
+                if platform.system().lower().startswith("win"):
+                    _terminate_windows_process_tree(proc.pid)
+                else:
+                    os.killpg(proc.pid, signal.SIGTERM)
+            except OSError as exc:
+                if platform.system().lower().startswith("win"):
+                    self._send_json({"error": str(exc)}, HTTPStatus.CONFLICT)
+                    return
                 proc.terminate()
             item["killed"] = time.time()
-            self._send_json({"ok": True, "id": command_id, "message": "Kill signal sent."})
+            self._send_json({"ok": True, "id": command_id, "message": "Command process tree terminated."})
             return
         if command_id.startswith("pid-"):
             pid = _int_or_none(command_id.removeprefix("pid-"))
             if pid is not None and self._is_external_scan_debug_pid(pid):
                 try:
-                    os.kill(pid, signal.SIGTERM)
+                    if platform.system().lower().startswith("win"):
+                        _terminate_windows_process_tree(pid)
+                    else:
+                        os.kill(pid, signal.SIGTERM)
                 except OSError as exc:
                     self._send_json({"error": str(exc)}, HTTPStatus.CONFLICT)
                     return
-                self._send_json({"ok": True, "id": command_id, "message": f"Kill signal sent to PID {pid}."})
+                self._send_json({"ok": True, "id": command_id, "message": f"Command process tree {pid} terminated."})
                 return
         self._send_json({"error": "No matching GUI/API command is running."}, HTTPStatus.NOT_FOUND)
 

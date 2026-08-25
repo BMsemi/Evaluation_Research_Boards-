@@ -1,4 +1,6 @@
 .DS_Store
+__pycache__/
+*.py[cod]
 api_v1/.DS_Store
 api_v1/runs/
 .env

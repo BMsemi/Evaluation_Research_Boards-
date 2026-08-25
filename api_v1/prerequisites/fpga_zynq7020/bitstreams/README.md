@@ -6,7 +6,8 @@ These bitstreams are checked in so the AX7020/Zynq FPGA can be reprogrammed afte
 
 | File | Use |
 |---|---|
-| `caravel_scan_debug_fpga_array_read_r00cXX_burst.bit` | Column-burst array read starting at row `0`, column `XX`, with `SEQUENCE_MODE=1` and the API burst timing defaults. |
+| `caravel_scan_debug_fpga_array_read_r00cXX_burst.bit` | Older column-burst array read backup using the original API burst timing. |
+| `caravel_scan_debug_fpga_array_read_r00cXX_init*_tm*_rst*_gap*_burst.bit` | Current column-burst array read naming. The filename records startup delay cycles, TM hold cycles, FPGA reset assert cycles, and repeat gap cycles so stale bitstreams are not reused by accident. |
 | `caravel_scan_debug_fpga_active_20260822_050304.bit` | Active remote Zynq bitstream copied from `C:/Users/geethika/zynq_scan_debug/caravel_scan_debug_fpga.bit` on 2026-08-22. |
 | `caravel_scan_debug_fpga_read1405_repeat.bit` | Known-good read packet `0x1405`, cell `(5,0)`, copied from the chip1 cell (5,0) forming package. |
 | `caravel_scan_debug_fpga_set9405_repeat.bit` | Known-good set packet `0x9405`, cell `(5,0)`, copied from the chip1 cell (5,0) forming package. |

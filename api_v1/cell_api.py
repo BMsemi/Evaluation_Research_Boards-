@@ -12,6 +12,7 @@ import shutil
 import statistics
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -179,8 +180,20 @@ class ScanDebugConfig:
     trim_data_seconds: float = 0.000003
     digital_threshold_volts: float = 1.2
     enable_adc_monitor: bool = True
-    burst_initial_delay_cycles: int = 40_000_000
-    burst_repeat_after_done_cycles: int = 10_000_000
+    burst_initial_delay_cycles: int = 1_000_000
+    burst_repeat_after_done_cycles: int = 1
+    burst_capture_strategy: Literal["single", "per-cell"] = "single"
+    burst_post_dr_tm_hold_cycles: int = 100
+    burst_fpga_reset_assert_cycles: int = 24_000
+    burst_reset_release_fallback_cycles: int = 2_000
+    burst_post_reset_wait_cycles: int = 128
+    burst_wb_clk_period_seconds: float = 0.0000005
+    burst_single_capture_margin_seconds: float = 0.25
+    burst_analog_sample_rate: int = 3_125_000
+    full_array_burst_digital_sample_rate: int = 6_250_000
+    full_array_burst_analog_sample_rate: int = 31_250
+    full_array_burst_capture_timeout_seconds: float = 900.0
+    full_array_burst_packet_period_seconds: float = 0.01312428
     burst_after_trigger_seconds: float = 0.000028
     burst_trim_data_seconds: float = 0.000003
     burst_capture_timeout_seconds: float = 420.0
@@ -244,7 +257,7 @@ class CommandRunner:
         return proc
 
     def ssh(self, host: str, command: str, *, timeout_s: int | None = None, log: Path | None = None) -> subprocess.CompletedProcess[str]:
-        return self.run(["ssh", host, command], timeout_s=timeout_s, log=log)
+        return self.run(["ssh", "-o", "ConnectTimeout=15", host, command], timeout_s=timeout_s, log=log)
 
     def ssh_with_expect_password(
         self,
@@ -263,7 +276,7 @@ class CommandRunner:
             raise RuntimeError("expect is required for password SSH automation on this platform; use SSH keys or install expect")
         script = f"""
 set timeout {timeout_s or 600}
-spawn ssh {host} {{{command}}}
+spawn ssh -o ConnectTimeout=15 {host} {{{command}}}
 expect {{
   -re "password:" {{ send "{password}\\r"; exp_continue }}
   eof
@@ -417,7 +430,13 @@ class ScanDebugCellAPI:
             failures: list[str] = []
             for attempt in range(1, attempts + 1):
                 attempt_note = f" attempt {attempt}" if attempts > 1 else ""
-                self._append_progress("read-array", f"Column {col}: starting Saleae burst{attempt_note}", cells=len(all_reads), total=total)
+                strategy = "single-capture" if self.config.burst_capture_strategy == "single" else "per-cell"
+                self._append_progress(
+                    "read-array",
+                    f"Column {col}: starting Saleae {strategy} burst{attempt_note}",
+                    cells=len(all_reads),
+                    total=total,
+                )
                 remote_output_dir = self._capture_array_burst(
                     packet,
                     self.config.read_rails,
@@ -795,7 +814,13 @@ exit
 """
 
     def _ensure_array_bitstream(self, row_start: int, col_start: int) -> str:
-        bit_name = f"caravel_scan_debug_fpga_array_read_r{row_start:02d}c{col_start:02d}_burst.bit"
+        bit_name = (
+            f"caravel_scan_debug_fpga_array_read_r{row_start:02d}c{col_start:02d}"
+            f"_init{self.config.burst_initial_delay_cycles}"
+            f"_tm{self.config.burst_post_dr_tm_hold_cycles}"
+            f"_rst{self.config.burst_fpga_reset_assert_cycles}"
+            f"_gap{self.config.burst_repeat_after_done_cycles}_burst.bit"
+        )
         if self.config.dry_run:
             return bit_name
         if self._remote_file_exists(bit_name):
@@ -832,12 +857,20 @@ exit
             if local_path.exists() and not force:
                 cached.append(local_path.name)
                 continue
-            bit_name = f"caravel_scan_debug_fpga_array_read_r{row_start:02d}c{col:02d}_burst.bit"
+            bit_name = (
+                f"caravel_scan_debug_fpga_array_read_r{row_start:02d}c{col:02d}"
+                f"_init{self.config.burst_initial_delay_cycles}"
+                f"_tm{self.config.burst_post_dr_tm_hold_cycles}"
+                f"_rst{self.config.burst_fpga_reset_assert_cycles}"
+                f"_gap{self.config.burst_repeat_after_done_cycles}_burst.bit"
+            )
             if self.config.dry_run:
                 built.append(bit_name)
                 continue
             if force and self._remote_file_exists(bit_name):
                 self._remove_remote_file(bit_name)
+            if force and local_path.exists():
+                local_path.unlink()
             self._ensure_array_bitstream(row_start, col)
             self._copy_remote_binary_to_local(bit_name, local_path)
             built.append(local_path.name)
@@ -851,9 +884,14 @@ exit
             "bitstream_dir": str(FPGA_BITSTREAM_DIR.relative_to(ROOT)),
         }
 
-    @staticmethod
-    def _cached_array_bitstream(row_start: int, col_start: int) -> Path:
-        return FPGA_BITSTREAM_DIR / f"caravel_scan_debug_fpga_array_read_r{row_start:02d}c{col_start:02d}_burst.bit"
+    def _cached_array_bitstream(self, row_start: int, col_start: int) -> Path:
+        return FPGA_BITSTREAM_DIR / (
+            f"caravel_scan_debug_fpga_array_read_r{row_start:02d}c{col_start:02d}"
+            f"_init{self.config.burst_initial_delay_cycles}"
+            f"_tm{self.config.burst_post_dr_tm_hold_cycles}"
+            f"_rst{self.config.burst_fpga_reset_assert_cycles}"
+            f"_gap{self.config.burst_repeat_after_done_cycles}_burst.bit"
+        )
 
     @staticmethod
     def _array_sweep_cells(row_start: int = 0, col_start: int = 0) -> list[CellAddress]:
@@ -888,6 +926,10 @@ synth_design -top caravel_scan_debug_fpga -part $part_name -generic [list \\
     OP_SET=0 \\
     SEQUENCE_MODE=1 \\
     INITIAL_SEQUENCE_DELAY_CYCLES={self.config.burst_initial_delay_cycles} \\
+    RESET_RELEASE_FALLBACK_CYCLES={self.config.burst_reset_release_fallback_cycles} \\
+    FPGA_RESET_ASSERT_CYCLES={self.config.burst_fpga_reset_assert_cycles} \\
+    POST_RESET_WAIT_CYCLES={self.config.burst_post_reset_wait_cycles} \\
+    POST_DR_TM_HOLD_CYCLES={self.config.burst_post_dr_tm_hold_cycles} \\
     REPEAT_AFTER_DONE_CYCLES={self.config.burst_repeat_after_done_cycles} \\
     SEQ_START_ROW={row_start} \\
     SEQ_START_COL={col_start} \\
@@ -915,15 +957,21 @@ exit
 
     def _write_remote_saleae_text(self, filename: str, text: str) -> None:
         encoded = base64.b64encode(text.encode()).decode()
-        proc = self._run_saleae(
+        command = (
             f"python3 - <<'PY'\n"
             f"import base64, pathlib\n"
             f"pathlib.Path({filename!r}).write_bytes(base64.b64decode({encoded!r}))\n"
-            f"PY",
-            timeout_s=60,
+            f"PY"
         )
-        if proc.returncode != 0:
-            raise RuntimeError(proc.stdout)
+        last_output = ""
+        for attempt in range(1, 4):
+            proc = self._run_saleae(command, timeout_s=60)
+            if proc.returncode == 0:
+                return
+            last_output = proc.stdout
+            if attempt < 3:
+                time.sleep(2.0)
+        raise RuntimeError(last_output)
 
     def _run_saleae(self, command: str, timeout_s: int | None = None) -> subprocess.CompletedProcess[str]:
         full_command = f"cd {self.config.saleae_dir} && {command}"
@@ -957,10 +1005,27 @@ exit
             "START_ROW": str(row_start),
             "START_COL": str(col_start),
             "MAX_CELLS": str(max_cells),
-            "AFTER_TRIGGER_SECONDS": str(self.config.burst_after_trigger_seconds),
+            "CAPTURE_STRATEGY": self.config.burst_capture_strategy,
+            "POST_DR_TM_HOLD_CYCLES": str(self.config.burst_post_dr_tm_hold_cycles),
+            "FPGA_RESET_ASSERT_CYCLES": str(self.config.burst_fpga_reset_assert_cycles),
+            "RESET_RELEASE_FALLBACK_CYCLES": str(self.config.burst_reset_release_fallback_cycles),
+            "POST_RESET_WAIT_CYCLES": str(self.config.burst_post_reset_wait_cycles),
+            "REPEAT_AFTER_DONE_CYCLES": str(self.config.burst_repeat_after_done_cycles),
+            "WB_CLK_PERIOD_SECONDS": str(self.config.burst_wb_clk_period_seconds),
+            "FULL_ARRAY_PACKET_PERIOD_SECONDS": str(self.config.full_array_burst_packet_period_seconds),
+            "MEASURE_SKIP_END_CYCLES": "3",
+            "AFTER_TRIGGER_SECONDS": str(self._burst_after_trigger_seconds(max_cells)),
             "TRIM_DATA_SECONDS": str(self.config.burst_trim_data_seconds),
             "STOP_ON_MISMATCH": "0",
+            "TRIGGER_CHANNEL_INDEX": "11",
+            "TRIGGER_TYPE": "FALLING",
         }
+        if self.config.burst_capture_strategy == "single" and max_cells > 128:
+            env["DIGITAL_SAMPLE_RATE"] = str(self.config.full_array_burst_digital_sample_rate)
+            env["ANALOG_SAMPLE_RATE"] = str(self.config.full_array_burst_analog_sample_rate)
+            env["FULL_ARRAY_DETERMINISTIC_TIMING"] = "1"
+        elif self.config.burst_capture_strategy == "single":
+            env["ANALOG_SAMPLE_RATE"] = str(self.config.burst_analog_sample_rate)
         env_text = " ".join(f"{k}={self._sh_quote(v)}" for k, v in env.items())
         capture_cmd = f"env {env_text} {self.config.saleae_burst_capture_script}"
         capture_log = self.config.run_dir / f"capture_{index}_read_array_burst.log"
@@ -976,18 +1041,51 @@ exit
         for attempt in range(1, attempts + 1):
             attempt_log = capture_log if attempts == 1 else self.config.run_dir / f"capture_{index}_read_array_burst_attempt{attempt}.log"
             capture_proc = self._popen_saleae(capture_cmd)
-            time.sleep(2.0)
-            self._append_progress("read-array", f"Programming FPGA for {burst_label}", mode="burst")
-            program_rc = self._program_fpga(bitstream)
-            self._append_progress("read-array", f"Saleae capturing {burst_label}", mode="burst")
+            output_lines: list[str] = []
+            reader_done = threading.Event()
+
+            def read_capture_stdout() -> None:
+                try:
+                    if capture_proc.stdout is not None:
+                        for line in capture_proc.stdout:
+                            output_lines.append(line)
+                finally:
+                    reader_done.set()
+
+            threading.Thread(target=read_capture_stdout, daemon=True).start()
+            armed = False
+            arm_deadline = time.monotonic() + 60.0
+            while time.monotonic() < arm_deadline:
+                if any("SINGLE_CAPTURE_ARMED" in line or line.startswith("ARMED ") for line in output_lines):
+                    armed = True
+                    break
+                if capture_proc.poll() is not None:
+                    break
+                time.sleep(0.05)
+
+            program_rc = -1
+            if armed:
+                self._append_progress("read-array", f"Programming FPGA for {burst_label}", mode="burst")
+                program_rc = self._program_fpga(bitstream)
+                self._append_progress("read-array", f"Saleae capturing {burst_label}", mode="burst")
+            else:
+                self._append_progress("read-array", f"Saleae did not arm for {burst_label}", mode="burst")
+                capture_proc.terminate()
             timed_out = False
+            capture_timeout_s = (
+                self.config.full_array_burst_capture_timeout_seconds
+                if self.config.burst_capture_strategy == "single" and max_cells > 128
+                else self.config.burst_capture_timeout_seconds
+            )
             try:
-                output, _ = capture_proc.communicate(timeout=self.config.burst_capture_timeout_seconds)
+                capture_proc.wait(timeout=capture_timeout_s)
             except subprocess.TimeoutExpired:
                 timed_out = True
                 capture_proc.kill()
-                output, _ = capture_proc.communicate()
-                output = (output or "") + f"\nTIMEOUT after {self.config.burst_capture_timeout_seconds:.0f}s waiting for Saleae burst capture\n"
+                capture_proc.wait()
+                output_lines.append(f"\nTIMEOUT after {capture_timeout_s:.0f}s waiting for Saleae burst capture\n")
+            reader_done.wait(timeout=2.0)
+            output = "".join(output_lines)
             attempt_log.write_text(output or "")
             remote_output_dir = ""
             for line in (output or "").splitlines():
@@ -1060,6 +1158,21 @@ exit
             f"burst capture/program failed {burst_label} after {attempts} attempts; "
             f"see {capture_log}"
         )
+
+    def _burst_after_trigger_seconds(self, max_cells: int) -> float:
+        if self.config.burst_capture_strategy != "single":
+            return self.config.burst_after_trigger_seconds
+        cycles_per_cell = (
+            (self.config.burst_fpga_reset_assert_cycles + 1)
+            + (self.config.burst_reset_release_fallback_cycles + 1)
+            + (self.config.burst_post_reset_wait_cycles + 1)
+            + 1
+            + 18
+            + self.config.burst_post_dr_tm_hold_cycles
+            + (self.config.burst_repeat_after_done_cycles + 1)
+        )
+        estimated = cycles_per_cell * max(1, max_cells) * self.config.burst_wb_clk_period_seconds
+        return max(self.config.burst_after_trigger_seconds, estimated + self.config.burst_single_capture_margin_seconds)
 
     def _append_burst_manifest(self, local_output_dir: Path, remote_output_dir: str, bitstream: str) -> list[dict[str, object]]:
         burst_manifest = local_output_dir / "manifest.csv"
@@ -1283,6 +1396,8 @@ exit
             "Failed to connect to remote host: Connection refused",
             "Connection refused",
             "DeviceSetupFailure",
+            "Cannot switch sessions while recording",
+            "InternalServerError",
             "failed to connect to all addresses",
             "StatusCode.UNAVAILABLE",
             "_InactiveRpcError",
@@ -1420,7 +1535,16 @@ PY
 
     def _restart_saleae_automation(self, index: int, kind: str, attempt: int) -> Path:
         restart_log = self.config.run_dir / f"saleae_restart_{index}_{kind}_after_attempt{attempt}.log"
-        command = self.config.saleae_restart_script
+        command = (
+            "pkill -TERM -f '[r]un_full_array_burst_capture.py' 2>/dev/null || true; "
+            "pkill -TERM -f '[L]ogic-linux-x64.AppImage' 2>/dev/null || true; "
+            "pkill -TERM -f '[L]ogic.bin' 2>/dev/null || true; "
+            "sleep 3; "
+            "pkill -KILL -f '[r]un_full_array_burst_capture.py' 2>/dev/null || true; "
+            "pkill -KILL -f '[L]ogic-linux-x64.AppImage' 2>/dev/null || true; "
+            "pkill -KILL -f '[L]ogic.bin' 2>/dev/null || true; "
+            f"sleep 2; {self.config.saleae_restart_script}"
+        )
         if self.config.saleae_host:
             proc = self.runner.ssh(
                 self.config.saleae_host,
@@ -1599,6 +1723,26 @@ PY
             raise RuntimeError(proc.stdout)
 
     def _write_remote_binary(self, filename: str, data: bytes) -> None:
+        scp_error = ""
+        if self.config.zynq_host and not self.config.zynq_password:
+            scp = shutil.which("scp")
+            if scp:
+                upload_path = self.config.run_dir / f".{filename}.upload"
+                upload_path.write_bytes(data)
+                try:
+                    target = f"{self.config.zynq_host}:{self.config.zynq_dir.rstrip('/')}/{filename}"
+                    proc = self.runner.run([scp, str(upload_path), target], timeout_s=180)
+                    if proc.returncode == 0:
+                        return
+                    scp_error = proc.stdout
+                finally:
+                    upload_path.unlink(missing_ok=True)
+            if len(data) > 100_000:
+                raise RuntimeError(f"scp upload failed for {filename}: {scp_error or 'scp not found'}")
+        elif self.config.zynq_host and len(data) > 100_000:
+            self._write_remote_binary_chunked(filename, data)
+            return
+
         encoded = base64.b64encode(data).decode()
         if self.config.zynq_os == "windows":
             cmd = f"$b='{encoded}'; [IO.File]::WriteAllBytes('{filename}', [Convert]::FromBase64String($b))"
@@ -1609,6 +1753,46 @@ PY
                 f"import base64, pathlib\n"
                 f"pathlib.Path({filename!r}).write_bytes(base64.b64decode({encoded!r}))\n"
                 f"PY",
+                timeout_s=180,
+            )
+        if proc.returncode != 0:
+            raise RuntimeError(proc.stdout)
+
+    def _write_remote_binary_chunked(self, filename: str, data: bytes) -> None:
+        encoded = base64.b64encode(data).decode()
+        chunk_chars = 48_000
+        b64_name = f"{filename}.b64tmp"
+        if self.config.zynq_os == "windows":
+            proc = self._run_zynq_powershell(
+                f"[IO.File]::WriteAllText('{b64_name}', '', [Text.Encoding]::ASCII)",
+                timeout_s=60,
+            )
+            if proc.returncode != 0:
+                raise RuntimeError(proc.stdout)
+            for offset in range(0, len(encoded), chunk_chars):
+                chunk = encoded[offset:offset + chunk_chars]
+                proc = self._run_zynq_powershell(
+                    f"[IO.File]::AppendAllText('{b64_name}', '{chunk}', [Text.Encoding]::ASCII)",
+                    timeout_s=60,
+                )
+                if proc.returncode != 0:
+                    raise RuntimeError(proc.stdout)
+            proc = self._run_zynq_powershell(
+                f"[IO.File]::WriteAllBytes('{filename}', [Convert]::FromBase64String([IO.File]::ReadAllText('{b64_name}'))); "
+                f"Remove-Item -Force '{b64_name}'",
+                timeout_s=180,
+            )
+        else:
+            proc = self._run_zynq(f": > {self._sh_quote(b64_name)}", timeout_s=60)
+            if proc.returncode != 0:
+                raise RuntimeError(proc.stdout)
+            for offset in range(0, len(encoded), chunk_chars):
+                chunk = encoded[offset:offset + chunk_chars]
+                proc = self._run_zynq(f"printf %s {self._sh_quote(chunk)} >> {self._sh_quote(b64_name)}", timeout_s=60)
+                if proc.returncode != 0:
+                    raise RuntimeError(proc.stdout)
+            proc = self._run_zynq(
+                f"base64 -d {self._sh_quote(b64_name)} > {self._sh_quote(filename)} && rm -f {self._sh_quote(b64_name)}",
                 timeout_s=180,
             )
         if proc.returncode != 0:
@@ -1667,7 +1851,12 @@ PY
     def _popen_saleae(self, command: str) -> subprocess.Popen[str]:
         full_command = f"cd {self.config.saleae_dir} && {command}"
         if self.config.saleae_host:
-            return subprocess.Popen(["ssh", self.config.saleae_host, full_command], text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            return subprocess.Popen(
+                ["ssh", "-o", "ConnectTimeout=15", self.config.saleae_host, full_command],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+            )
         return subprocess.Popen(self._local_shell_command(full_command), text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
 
     @staticmethod

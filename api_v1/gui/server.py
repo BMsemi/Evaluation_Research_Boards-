@@ -245,7 +245,10 @@ def _parse_scan_debug_process(command: str) -> dict[str, Any]:
     row = _int_or_none(flag_value("--row"))
     col = _int_or_none(flag_value("--col"))
     col_start = _int_or_none(flag_value("--col-start"))
+    array_mode = flag_value("--array-mode")
     run_dir = flag_value("--run-dir")
+    if operation == "read-array" and array_mode == "burst":
+        operation = "burst-read"
     out: dict[str, Any] = {"operation": operation}
     if row is not None:
         out["row"] = row
@@ -253,6 +256,8 @@ def _parse_scan_debug_process(command: str) -> dict[str, Any]:
         out["col"] = col
     if col_start is not None:
         out["colStart"] = col_start
+    if array_mode:
+        out["arrayMode"] = array_mode
     if run_dir:
         try:
             out["runDir"] = str(Path(run_dir).resolve().relative_to(ROOT))
@@ -327,13 +332,20 @@ def _array_resume_info(run_dir: Path, rows: list[dict[str, Any]]) -> dict[str, A
         if not _is_read_row(row) or not isinstance(cell, dict) or not isinstance(cell.get("col"), int):
             continue
         col_rows.setdefault(cell["col"], []).append(row)
+    start_col = 0
+    name_match = re.search(r"array_col(\d{2})(?:_to_(\d{2}))?", run_dir.name)
+    if name_match:
+        start_col = max(0, min(GRID_SIZE - 1, int(name_match.group(1))))
+    elif col_rows:
+        start_col = min(col_rows)
     complete_cols = {
         col
         for col, items in col_rows.items()
+        if col >= start_col
         if len(items) >= GRID_SIZE
         and not any(row.get("error") and _saleae_error_needs_restart(str(row.get("error", ""))) for row in items)
     }
-    incomplete_cols = [col for col in range(GRID_SIZE) if col not in complete_cols]
+    incomplete_cols = [col for col in range(start_col, GRID_SIZE) if col not in complete_cols]
     col_start = incomplete_cols[0] if incomplete_cols else None
     return {
         "isArrayRun": is_array_run,
@@ -569,7 +581,8 @@ class GuiHandler(SimpleHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", "0"))
         payload = json.loads(self.rfile.read(length) or b"{}")
         operation = str(payload.get("operation", "read"))
-        array_mode = "burst-columns"
+        array_mode = "burst" if operation == "burst-read" else "burst-columns"
+        cli_operation = "read-array" if operation == "burst-read" else operation
         row = int(payload.get("row", 0))
         col = int(payload.get("col", 0))
         resume_run = str(payload.get("resumeRun", "")).strip()
@@ -578,7 +591,7 @@ class GuiHandler(SimpleHTTPRequestHandler):
         dry_run = bool(payload.get("dryRun", False))
         confirmed = bool(payload.get("confirmHardware", False))
         if (
-            operation not in {"read", "set", "reset", "cycle", "read-array"}
+            operation not in {"read", "set", "reset", "cycle", "read-array", "burst-read"}
             or not (0 <= row < GRID_SIZE and 0 <= col < GRID_SIZE)
         ):
             self._send_json({"error": "Invalid operation or cell."}, HTTPStatus.BAD_REQUEST)
@@ -620,13 +633,17 @@ class GuiHandler(SimpleHTTPRequestHandler):
                 row = int(sweep_resume_info.get("row", row))
                 col = int(sweep_resume_info.get("col", col))
         else:
-            run_label = "array" if operation == "read-array" else f"r{row:02d}c{col:02d}"
+            run_label = "full_array_burst" if operation == "burst-read" else "array" if operation == "read-array" else f"r{row:02d}c{col:02d}"
             run_dir = ROOT / "api_v1" / "runs" / f"gui_{time.strftime('%Y%m%d_%H%M%S')}_{run_label}_{operation}"
             run_dir.mkdir(parents=True, exist_ok=True)
-        cmd = [sys.executable, str(ROOT / "api_v1" / "scan_debug_cli.py"), operation, "--run-dir", str(run_dir)]
+        cmd = [sys.executable, str(ROOT / "api_v1" / "scan_debug_cli.py"), cli_operation, "--run-dir", str(run_dir)]
         command_env = os.environ.copy()
-        if operation != "read-array":
+        if operation not in {"read-array", "burst-read"}:
             cmd.extend(["--row", str(row), "--col", str(col)])
+        elif operation == "burst-read":
+            row = 0
+            col = 0
+            cmd.extend(["--array-mode", array_mode, "--row-start", "0", "--row-end", "31", "--col-start", "0", "--col-end", "31"])
         else:
             cmd.extend(["--array-mode", array_mode])
             if resume_info:
@@ -656,7 +673,7 @@ class GuiHandler(SimpleHTTPRequestHandler):
         self.running_commands[key] = {
             "proc": proc,
             "operation": operation,
-            "arrayMode": array_mode if operation == "read-array" else "",
+            "arrayMode": array_mode if operation in {"read-array", "burst-read"} else "",
             "resume": is_resume,
             "row": row,
             "col": col,

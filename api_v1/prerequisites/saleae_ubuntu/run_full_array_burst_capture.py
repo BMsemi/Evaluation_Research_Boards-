@@ -8,6 +8,7 @@ import statistics
 import sys
 import threading
 import time
+from bisect import bisect_left, bisect_right
 from datetime import datetime
 from pathlib import Path
 
@@ -34,6 +35,16 @@ START_ROW = int(os.environ.get("START_ROW", "0"))
 START_COL = int(os.environ.get("START_COL", "0"))
 TRIGGER_CHANNEL_INDEX = int(os.environ.get("TRIGGER_CHANNEL_INDEX", "9"))
 TRIGGER_TYPE = os.environ.get("TRIGGER_TYPE", "RISING").strip().upper()
+CAPTURE_STRATEGY = os.environ.get("CAPTURE_STRATEGY", "single").strip().lower()
+MEASURE_SKIP_END_CYCLES = float(os.environ.get("MEASURE_SKIP_END_CYCLES", "3"))
+FULL_ARRAY_DETERMINISTIC_TIMING = os.environ.get("FULL_ARRAY_DETERMINISTIC_TIMING", "0") == "1"
+FPGA_RESET_ASSERT_CYCLES = int(os.environ.get("FPGA_RESET_ASSERT_CYCLES", "24000"))
+RESET_RELEASE_FALLBACK_CYCLES = int(os.environ.get("RESET_RELEASE_FALLBACK_CYCLES", "2000"))
+POST_RESET_WAIT_CYCLES = int(os.environ.get("POST_RESET_WAIT_CYCLES", "128"))
+POST_DR_TM_HOLD_CYCLES = int(os.environ.get("POST_DR_TM_HOLD_CYCLES", "100"))
+REPEAT_AFTER_DONE_CYCLES = int(os.environ.get("REPEAT_AFTER_DONE_CYCLES", "1"))
+WB_CLK_PERIOD_SECONDS = float(os.environ.get("WB_CLK_PERIOD_SECONDS", "0.0000005"))
+FULL_ARRAY_PACKET_PERIOD_SECONDS = float(os.environ.get("FULL_ARRAY_PACKET_PERIOD_SECONDS", "0.01312428"))
 
 
 def sweep_cells():
@@ -241,6 +252,385 @@ def digital_trigger_type():
     raise ValueError(f"Unsupported TRIGGER_TYPE={TRIGGER_TYPE!r}; use RISING or FALLING")
 
 
+def transitions_for_channels(path: Path, channels):
+    fields = {channel: f"Channel {channel}" for channel in channels}
+    transitions = {channel: [] for channel in channels}
+    previous = {}
+    with path.open(newline="") as handle:
+        reader = csv.DictReader(handle)
+        for row in reader:
+            t_s = float(row["Time [s]"])
+            for channel, field in fields.items():
+                if field not in row:
+                    continue
+                value = int(row[field])
+                if channel not in previous or value != previous[channel]:
+                    transitions[channel].append((t_s, value))
+                    previous[channel] = value
+    return transitions
+
+
+def transition_times(transitions, from_v, to_v, after=None, before=None):
+    times = []
+    if len(transitions) < 2:
+        return times
+    prior_t, prior_v = transitions[0]
+    for t_s, value in transitions[1:]:
+        if after is not None and t_s <= after:
+            prior_t, prior_v = t_s, value
+            continue
+        if before is not None and t_s >= before:
+            break
+        if prior_v == from_v and value == to_v:
+            times.append(t_s)
+        prior_t, prior_v = t_s, value
+    return times
+
+
+def last_transition(transitions, from_v, to_v, before):
+    found = None
+    if len(transitions) < 2:
+        return found
+    prior_t, prior_v = transitions[0]
+    for t_s, value in transitions[1:]:
+        if t_s >= before:
+            break
+        if prior_v == from_v and value == to_v:
+            found = t_s
+        prior_t, prior_v = t_s, value
+    return found
+
+
+def clock_rises(transitions):
+    return transition_times(transitions, 0, 1)
+
+
+def decode_packet_windows(digital_csv: Path, max_windows: int):
+    transitions = transitions_for_channels(digital_csv, [8, 9, 10, 11])
+    clk = transitions[8]
+    tm = deglitch(transitions[9])
+    dl = deglitch(transitions[10])
+    dr = deglitch(transitions[11])
+    clk_rises = clock_rises(clk)
+    dr_falls = transition_times(dr, 1, 0)
+    windows = []
+
+    for dr_fall in dr_falls:
+        if len(windows) >= max_windows:
+            break
+        dr_rise = first_transition(dr, 0, 1, after=dr_fall)
+        if dr_rise is None:
+            continue
+        tm_fall = first_transition(tm, 1, 0, after=dr_rise)
+        tm_rise = last_transition(tm, 0, 1, before=dr_fall)
+        low_start = bisect_left(clk_rises, dr_fall)
+        low_stop = bisect_right(clk_rises, dr_rise)
+        low_samples = [
+            value_at(dl, t_s)
+            for t_s in clk_rises[low_start:low_stop]
+            if dr_fall < t_s < dr_rise and value_at(tm, t_s) == 1
+        ]
+        decoded = None
+        if len(low_samples) >= 17:
+            decoded = 0
+            for bit in range(16):
+                decoded |= (low_samples[1 + bit] & 1) << bit
+        near_start = bisect_left(clk_rises, dr_fall - 10e-6)
+        near_stop = bisect_right(clk_rises, dr_rise + 10e-6)
+        near_clocks = clk_rises[near_start:near_stop]
+        periods = [b - a for a, b in zip(near_clocks, near_clocks[1:])]
+        clock_period = statistics.median(periods) if periods else None
+        measure_start = dr_rise
+        measure_stop = tm_fall
+        if measure_stop is not None and clock_period is not None:
+            measure_stop = max(measure_start, measure_stop - (MEASURE_SKIP_END_CYCLES * clock_period))
+        windows.append(
+            {
+                "decoded_packet": decoded,
+                "decoded_packet_hex": f"0x{decoded:04x}" if decoded is not None else "",
+                "low_sample_count": len(low_samples),
+                "low_samples": "".join(str(value) for value in low_samples[:18]),
+                "tm_rise_s": tm_rise,
+                "tm_fall_s": tm_fall,
+                "dr_fall_s": dr_fall,
+                "dr_rise_s": dr_rise,
+                "dr_low_width_s": dr_rise - dr_fall,
+                "clock_period_s_median": round(clock_period, 12) if clock_period is not None else None,
+                "measurement_start_s": measure_start,
+                "measurement_stop_s": measure_stop,
+            }
+        )
+    return windows
+
+
+def deterministic_packet_windows(cells):
+    fallback_cycles_per_cell = (
+        (FPGA_RESET_ASSERT_CYCLES + 1)
+        + (RESET_RELEASE_FALLBACK_CYCLES + 1)
+        + (POST_RESET_WAIT_CYCLES + 1)
+        + 1
+        + 18
+        + POST_DR_TM_HOLD_CYCLES
+        + (REPEAT_AFTER_DONE_CYCLES + 1)
+    )
+    packet_period = FULL_ARRAY_PACKET_PERIOD_SECONDS or (fallback_cycles_per_cell * WB_CLK_PERIOD_SECONDS)
+    windows = []
+    for index, (row, col) in enumerate(cells):
+        packet = packet_for(row, col)
+        dr_fall = index * packet_period
+        dr_rise = dr_fall + (18 * WB_CLK_PERIOD_SECONDS)
+        tm_rise = dr_fall - WB_CLK_PERIOD_SECONDS
+        tm_fall = dr_rise + (POST_DR_TM_HOLD_CYCLES * WB_CLK_PERIOD_SECONDS)
+        measure_stop = max(dr_rise, tm_fall - (MEASURE_SKIP_END_CYCLES * WB_CLK_PERIOD_SECONDS))
+        windows.append(
+            {
+                "decoded_packet": packet,
+                "decoded_packet_hex": f"0x{packet:04x}",
+                "low_sample_count": "deterministic",
+                "low_samples": lsb_bits(packet),
+                "tm_rise_s": tm_rise,
+                "tm_fall_s": tm_fall,
+                "dr_fall_s": dr_fall,
+                "dr_rise_s": dr_rise,
+                "dr_low_width_s": dr_rise - dr_fall,
+                "clock_period_s_median": round(WB_CLK_PERIOD_SECONDS, 12),
+                "measurement_start_s": dr_rise,
+                "measurement_stop_s": measure_stop,
+                "timing_source": "measured_packet_period" if FULL_ARRAY_PACKET_PERIOD_SECONDS else "fpga_sequence_parameters",
+                "packet_period_s": packet_period,
+                "fallback_cycles_per_cell": fallback_cycles_per_cell,
+            }
+        )
+    return windows
+
+
+def window_analog_summaries(analog_csv: Path, windows):
+    accum = [
+        {
+            "set": [],
+            "reset": [],
+        }
+        for _ in windows
+    ]
+    if not analog_csv.exists() or not windows:
+        return [
+            {
+                "set_A12_minus_A13_uA": {**stats([]), "units": "uA"},
+                "reset_A14_minus_A15_uA": {**stats([]), "units": "uA"},
+            }
+            for _ in windows
+        ]
+
+    ordered = [
+        (index, window.get("measurement_start_s"), window.get("measurement_stop_s"))
+        for index, window in enumerate(windows)
+        if window.get("measurement_start_s") is not None and window.get("measurement_stop_s") is not None
+    ]
+    ordered.sort(key=lambda item: item[1])
+    window_pos = 0
+    with analog_csv.open(newline="") as handle:
+        reader = csv.DictReader(handle)
+        for row in reader:
+            if window_pos >= len(ordered):
+                break
+            t_s = float(row["Time [s]"])
+            while window_pos < len(ordered) and t_s > ordered[window_pos][2]:
+                window_pos += 1
+            if window_pos >= len(ordered):
+                break
+            index, start_s, stop_s = ordered[window_pos]
+            if start_s <= t_s <= stop_s:
+                try:
+                    accum[index]["set"].append((float(row["Channel 12"]) - float(row["Channel 13"])) / SHUNT_OHMS * 1e6)
+                except (KeyError, ValueError):
+                    pass
+                try:
+                    accum[index]["reset"].append((float(row["Channel 14"]) - float(row["Channel 15"])) / SHUNT_OHMS * 1e6)
+                except (KeyError, ValueError):
+                    pass
+
+    return [
+        {
+            "set_A12_minus_A13_uA": {**stats(item["set"]), "units": "uA"},
+            "reset_A14_minus_A15_uA": {**stats(item["reset"]), "units": "uA"},
+        }
+        for item in accum
+    ]
+
+
+def run_single_capture(root: Path, cells, rails, adc_csv: Path, manifest_csv: Path, manifest_json: Path, run_log: Path):
+    trace_dir = root / "column_capture"
+    trace_dir.mkdir()
+    stop_event = threading.Event()
+    starts = {}
+    adc_state = {"enabled": ENABLE_ADC_MONITOR}
+    adc_thread = None
+    if ENABLE_ADC_MONITOR:
+        adc_thread = threading.Thread(target=base.adc_monitor, args=(stop_event, root, starts, adc_state), daemon=True)
+        adc_thread.start()
+        if ADC_START_DELAY_SECONDS > 0:
+            time.sleep(ADC_START_DELAY_SECONDS)
+
+    fieldnames = [
+        "index", "row", "col", "packet", "bits_lsb_first", "output_dir", "ok",
+        "decoded_packet", "low_sample_count", "tm_rise_s", "dr_low_width_s",
+        "clock_period_s_median", "la_set_mean_uA", "la_set_min_uA", "la_set_max_uA",
+        "la_reset_mean_uA", "la_reset_min_uA", "la_reset_max_uA",
+        "adc_read_uA", "adc_set_uA", "adc_reset_uA", "error",
+    ]
+    manifest = []
+    capture_started = None
+    capture_done = None
+
+    try:
+        with automation.Manager.connect(port=base.SALEAE_PORT, connect_timeout_seconds=5) as manager:
+            device = base.find_logic_device(manager)
+            app_info = manager.get_app_info()
+            device_config = automation.LogicDeviceConfiguration(
+                enabled_digital_channels=DIGITAL_CHANNELS,
+                enabled_analog_channels=ANALOG_CHANNELS,
+                digital_sample_rate=DIGITAL_SAMPLE_RATE,
+                analog_sample_rate=ANALOG_SAMPLE_RATE,
+                digital_threshold_volts=DIGITAL_THRESHOLD_VOLTS,
+            )
+            capture_config = automation.CaptureConfiguration(
+                capture_mode=automation.DigitalTriggerCaptureMode(
+                    trigger_channel_index=TRIGGER_CHANNEL_INDEX,
+                    trigger_type=digital_trigger_type(),
+                    after_trigger_seconds=AFTER_TRIGGER_SECONDS,
+                    trim_data_seconds=TRIM_DATA_SECONDS,
+                )
+            )
+            detail = (
+                f"SINGLE_CAPTURE cells={len(cells)} start=({START_ROW},{START_COL}) "
+                f"trigger=D{TRIGGER_CHANNEL_INDEX} {TRIGGER_TYPE} after={AFTER_TRIGGER_SECONDS}s "
+                f"digital_rate={DIGITAL_SAMPLE_RATE} analog_rate={ANALOG_SAMPLE_RATE} "
+                f"deterministic_timing={int(FULL_ARRAY_DETERMINISTIC_TIMING)}"
+            )
+            print(detail, flush=True)
+            run_log.write_text(detail + "\n")
+            capture_started = time.monotonic()
+            with manager.start_capture(
+                device_id=device.device_id,
+                device_configuration=device_config,
+                capture_configuration=capture_config,
+            ) as capture:
+                print("SINGLE_CAPTURE_ARMED", flush=True)
+                capture.wait()
+                export_digital_channels = [] if FULL_ARRAY_DETERMINISTIC_TIMING else DIGITAL_CHANNELS
+                capture.export_raw_data_csv(
+                    directory=str(trace_dir),
+                    digital_channels=export_digital_channels,
+                    analog_channels=ANALOG_CHANNELS,
+                    analog_downsample_ratio=1,
+                )
+            capture_done = time.monotonic()
+
+        if FULL_ARRAY_DETERMINISTIC_TIMING:
+            decoded_windows = deterministic_packet_windows(cells)
+        else:
+            decoded_windows = decode_packet_windows(trace_dir / "digital.csv", len(cells))
+        analog_windows = window_analog_summaries(trace_dir / "analog.csv", decoded_windows)
+        with manifest_csv.open("w", newline="") as manifest_handle:
+            writer = csv.DictWriter(manifest_handle, fieldnames=fieldnames)
+            writer.writeheader()
+            for index, (row, col) in enumerate(cells):
+                packet = packet_for(row, col)
+                decoded = decoded_windows[index] if index < len(decoded_windows) else {}
+                analog = analog_windows[index] if index < len(analog_windows) else {
+                    "set_A12_minus_A13_uA": {**stats([]), "units": "uA"},
+                    "reset_A14_minus_A15_uA": {**stats([]), "units": "uA"},
+                }
+                decoded_packet = decoded.get("decoded_packet")
+                ok = decoded_packet == packet
+                error = ""
+                if not decoded:
+                    error = "missing decoded packet window"
+                elif not ok:
+                    error = f"decoded {decoded.get('decoded_packet_hex') or '<none>'} != expected 0x{packet:04x}"
+                row_out = {
+                    "index": index,
+                    "row": row,
+                    "col": col,
+                    "packet": f"0x{packet:04x}",
+                    "bits_lsb_first": lsb_bits(packet),
+                    "output_dir": str(trace_dir),
+                    "ok": ok,
+                    "decoded_packet": decoded.get("decoded_packet_hex", ""),
+                    "low_sample_count": decoded.get("low_sample_count", ""),
+                    "tm_rise_s": decoded.get("tm_rise_s", ""),
+                    "dr_low_width_s": decoded.get("dr_low_width_s", ""),
+                    "clock_period_s_median": decoded.get("clock_period_s_median", ""),
+                    "la_set_mean_uA": analog["set_A12_minus_A13_uA"]["mean"],
+                    "la_set_min_uA": analog["set_A12_minus_A13_uA"]["min"],
+                    "la_set_max_uA": analog["set_A12_minus_A13_uA"]["max"],
+                    "la_reset_mean_uA": analog["reset_A14_minus_A15_uA"]["mean"],
+                    "la_reset_min_uA": analog["reset_A14_minus_A15_uA"]["min"],
+                    "la_reset_max_uA": analog["reset_A14_minus_A15_uA"]["max"],
+                    "adc_read_uA": "",
+                    "adc_set_uA": "",
+                    "adc_reset_uA": "",
+                    "error": error,
+                }
+                writer.writerow(row_out)
+                manifest.append(row_out)
+                if ok:
+                    set_mean = row_out["la_set_mean_uA"]
+                    reset_mean = row_out["la_reset_mean_uA"]
+                    set_text = f"{set_mean:.3f}uA" if set_mean is not None else "n/a"
+                    reset_text = f"{reset_mean:.3f}uA" if reset_mean is not None else "n/a"
+                    print(
+                        f"RESULT index={index:04d} ok=True decoded={row_out['decoded_packet']} "
+                        f"la_set_mean={set_text} "
+                        f"la_reset_mean={reset_text}",
+                        flush=True,
+                    )
+                else:
+                    print(f"ERROR index={index:04d} {error}", flush=True)
+                if STOP_ON_MISMATCH and not ok:
+                    break
+
+        (trace_dir / "decoded_windows.json").write_text(json.dumps(decoded_windows, indent=2))
+        (trace_dir / "analog_windows.json").write_text(json.dumps(analog_windows, indent=2))
+        manifest_json.write_text(json.dumps({
+            "output_root": str(root),
+            "capture_strategy": CAPTURE_STRATEGY,
+            "capture_dir": str(trace_dir),
+            "rails": rails,
+            "start_row": START_ROW,
+            "start_col": START_COL,
+            "cells_requested": len(cells),
+            "cells_captured": len(manifest),
+            "measurement_skip_end_cycles": MEASURE_SKIP_END_CYCLES,
+            "full_array_deterministic_timing": FULL_ARRAY_DETERMINISTIC_TIMING,
+            "fpga_timing": {
+                "fpga_reset_assert_cycles": FPGA_RESET_ASSERT_CYCLES,
+                "reset_release_fallback_cycles": RESET_RELEASE_FALLBACK_CYCLES,
+                "post_reset_wait_cycles": POST_RESET_WAIT_CYCLES,
+                "post_dr_tm_hold_cycles": POST_DR_TM_HOLD_CYCLES,
+                "repeat_after_done_cycles": REPEAT_AFTER_DONE_CYCLES,
+                "wb_clk_period_seconds": WB_CLK_PERIOD_SECONDS,
+            },
+            "capture_started_monotonic": capture_started,
+            "capture_done_monotonic": capture_done,
+            "adc_state": adc_state,
+            "saleae": {
+                "logic_app_version": app_info.app_version,
+                "digital_sample_rate": DIGITAL_SAMPLE_RATE,
+                "analog_sample_rate": ANALOG_SAMPLE_RATE,
+                "trigger_channel_index": TRIGGER_CHANNEL_INDEX,
+                "trigger_type": TRIGGER_TYPE,
+                "after_trigger_seconds": AFTER_TRIGGER_SECONDS,
+                "trim_data_seconds": TRIM_DATA_SECONDS,
+            },
+            "manifest": manifest,
+        }, indent=2))
+    finally:
+        stop_event.set()
+        if adc_thread is not None:
+            adc_thread.join(timeout=2.0)
+
+
 def main():
     configure_base_globals()
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -259,6 +649,13 @@ def main():
     } if SKIP_SET_RAILS else base.set_scan_set_rails()
     print(f"OUTPUT_ROOT={root}", flush=True)
     print(f"RAILS {rails['response']}", flush=True)
+
+    if CAPTURE_STRATEGY == "single":
+        run_single_capture(root, cells, rails, adc_csv, manifest_csv, manifest_json, run_log)
+        print(f"DONE output_root={root} cells={len(cells)}", flush=True)
+        return
+    if CAPTURE_STRATEGY not in ("per-cell", "per_cell"):
+        raise ValueError(f"Unsupported CAPTURE_STRATEGY={CAPTURE_STRATEGY!r}; use single or per-cell")
 
     stop_event = threading.Event()
     starts = {}

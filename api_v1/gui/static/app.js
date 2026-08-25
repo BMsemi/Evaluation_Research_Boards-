@@ -577,7 +577,9 @@ function renderCommandState(commands) {
     }
     if (Number.isFinite(running.row)) els.rowInput.value = running.row;
     if (Number.isFinite(running.col)) els.colInput.value = running.col;
-    const target = running.operation === "read-array"
+    const target = running.operation === "burst-read"
+      ? "full array burst"
+      : running.operation === "read-array"
       ? `array from col ${running.colStart ?? running.col ?? 0}`
       :
       Number.isFinite(running.row) ? `r${running.row} c${running.col ?? 0}` : "API";
@@ -721,8 +723,12 @@ els.commandForm.addEventListener("submit", async (event) => {
     payload.row = state.sweepResume.row;
     payload.col = state.sweepResume.col;
   }
-  const target = payload.operation === "read-array" ? `the array starting at column ${payload.col}` : `row ${payload.row}, col ${payload.col}`;
-  const extra = payload.operation === "read-array"
+  const target = payload.operation === "burst-read"
+    ? "the full 32x32 array in one burst"
+    : payload.operation === "read-array" ? `the array starting at column ${payload.col}` : `row ${payload.row}, col ${payload.col}`;
+  const extra = payload.operation === "burst-read"
+    ? "\n\nThis will use one FPGA full-array stream and one Saleae capture. It is not the resumable column-by-column read."
+    : payload.operation === "read-array"
     ? "\n\nThis will read columns from the selected start column through column 31."
     : continueSelectedSweep
       ? "\n\nThis will append to the selected run and skip pulse voltages already completed in its manifest."

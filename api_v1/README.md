@@ -393,7 +393,7 @@ Default 32 by 32 array read:
 python api_v1/scan_debug_cli.py read-array
 ```
 
-This uses column-by-column burst mode by default. The API reads column 0 through column 31 as separate burst chunks, appends each decoded column into the normal `manifest.csv`, and the GUI heatmap updates after each column.
+This uses column-by-column burst mode by default. For each column, the API programs one FPGA sequence bitstream, the FPGA sends all row packets for that column with a Caravel reset before every packet, and the Saleae helper captures one continuous trace for the whole column. The helper then decodes all packet/current windows into the normal `manifest.csv`, so the GUI heatmap updates after each column.
 
 One-shot full-array burst is still available from the CLI:
 
@@ -411,6 +411,12 @@ Old per-cell behavior is still available:
 
 ```bash
 python api_v1/scan_debug_cli.py read-array --array-mode serial
+```
+
+The older Saleae rearm/export loop can also be used with the burst-column FPGA sequence:
+
+```bash
+python api_v1/scan_debug_cli.py read-array --burst-capture-strategy per-cell --burst-repeat-cycles 10000000
 ```
 
 Full burst mode supports the full 32 by 32 array and publishes after final decode. Serial mode publishes after each individual cell read.

@@ -24,7 +24,7 @@ DIGITAL_THRESHOLD_VOLTS = float(os.environ.get("DIGITAL_THRESHOLD_VOLTS", "1.2")
 AFTER_TRIGGER_SECONDS = float(os.environ.get("AFTER_TRIGGER_SECONDS", "0.000028"))
 TRIM_DATA_SECONDS = float(os.environ.get("TRIM_DATA_SECONDS", "0.000003"))
 MAX_CELLS = int(os.environ.get("MAX_CELLS", "1024"))
-SHUNT_OHMS = 1000.0
+SHUNT_OHMS = float(os.environ.get("SHUNT_OHMS", "470.0"))
 RAIL_COMMAND = os.environ.get("RAIL_COMMAND", "SCAN_SET_RAILS").strip()
 SKIP_SET_RAILS = os.environ.get("SKIP_SET_RAILS", "0") == "1"
 ENABLE_ADC_MONITOR = os.environ.get("ENABLE_ADC_MONITOR", "1") != "0"

@@ -14,9 +14,11 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Iterable, Literal
+from typing import Iterator, Iterable, Literal
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -169,6 +171,12 @@ class ScanDebugConfig:
     dac_teensy_loader: str = "/home/ubuntu-24-04/teensy-tools-src/teensy_loader_cli_serial/teensy_loader_cli"
     dac_teensy_mcu: str = "TEENSY41"
     dac_teensy_hex: str = "/home/ubuntu-24-04/teensy-flash/build-DAC_analog_vltgs/DAC_analog_vltgs.ino.hex"
+    hardware_queue_enabled: bool = True
+    hardware_queue_host: str | None = None
+    hardware_queue_dir: str = "/tmp/scan_debug_hardware_queue.lock"
+    hardware_queue_timeout_seconds: float = 86_400.0
+    hardware_queue_poll_seconds: float = 5.0
+    hardware_queue_stale_seconds: float = 43_200.0
     summarizer: Path = DEFAULT_SUMMARIZER
 
     digital_sample_rate: int = 50_000_000
@@ -348,6 +356,94 @@ class ScanDebugCellAPI:
         self.runner = CommandRunner(self.config.dry_run)
         self.manifest = self.config.run_dir / "manifest.csv"
         self._ensure_manifest()
+
+    @contextmanager
+    def hardware_queue(self, operation: str) -> Iterator[None]:
+        if self.config.dry_run or not self.config.hardware_queue_enabled or operation == "build-array-bitstreams":
+            yield
+            return
+        host = self.config.hardware_queue_host or self.config.saleae_host
+        if not host:
+            yield
+            return
+        token = uuid.uuid4().hex
+        owner = (
+            f"token={token} host={platform.node() or 'unknown'} pid={os.getpid()} "
+            f"operation={operation} run_dir={self.config.run_dir} started={time.strftime('%Y-%m-%d %H:%M:%S %Z')}"
+        )
+        self._acquire_hardware_queue(host, token, owner, operation)
+        try:
+            yield
+        finally:
+            self._release_hardware_queue(host, token, operation)
+
+    def _acquire_hardware_queue(self, host: str, token: str, owner: str, operation: str) -> None:
+        deadline = time.time() + max(1.0, self.config.hardware_queue_timeout_seconds)
+        poll_seconds = max(1.0, self.config.hardware_queue_poll_seconds)
+        next_progress = 0.0
+        while True:
+            command = self._hardware_queue_acquire_command(token, owner)
+            proc = self.runner.ssh(host, command, timeout_s=20)
+            if proc.returncode == 0:
+                self._append_progress(operation, "Hardware queue lock acquired", queue="acquired")
+                return
+            now = time.time()
+            if now >= deadline:
+                owner_text = self._hardware_queue_owner(host)
+                raise RuntimeError(f"Timed out waiting for hardware queue. Current owner: {owner_text or 'unknown'}")
+            if now >= next_progress:
+                owner_text = self._hardware_queue_owner(host)
+                self._append_progress(
+                    operation,
+                    f"Queued: waiting for hardware bench{f' ({owner_text})' if owner_text else ''}",
+                    queue="waiting",
+                )
+                next_progress = now + 30.0
+            time.sleep(poll_seconds)
+
+    def _release_hardware_queue(self, host: str, token: str, operation: str) -> None:
+        proc = self.runner.ssh(host, self._hardware_queue_release_command(token), timeout_s=20)
+        if proc.returncode == 0:
+            self._append_progress(operation, "Hardware queue lock released", queue="released")
+        else:
+            self._append_progress(operation, "Hardware queue release failed", queue="release_failed")
+
+    def _hardware_queue_owner(self, host: str) -> str:
+        proc = self.runner.ssh(host, f"cat {self._sh_quote(self.config.hardware_queue_dir + '/owner')} 2>/dev/null || true", timeout_s=10)
+        return " ".join(proc.stdout.strip().split())[:180] if proc.returncode == 0 else ""
+
+    def _hardware_queue_acquire_command(self, token: str, owner: str) -> str:
+        lock_dir = self._sh_quote(self.config.hardware_queue_dir)
+        token_q = self._sh_quote(token)
+        owner_q = self._sh_quote(owner)
+        stale_seconds = int(max(60.0, self.config.hardware_queue_stale_seconds))
+        return (
+            f"lock_dir={lock_dir}; token={token_q}; owner={owner_q}; stale_seconds={stale_seconds}; "
+            "now=$(date +%s); "
+            'if mkdir "$lock_dir" 2>/dev/null; then '
+            'printf "%s\\n" "$token" > "$lock_dir/token"; '
+            'printf "%s\\n" "$owner" > "$lock_dir/owner"; '
+            'printf "%s\\n" "$now" > "$lock_dir/started"; '
+            "exit 0; "
+            "fi; "
+            'started=$(cat "$lock_dir/started" 2>/dev/null || echo 0); '
+            'case "$started" in (*[!0-9]*|"") started=0;; esac; '
+            'if [ "$started" -gt 0 ] && [ $((now - started)) -gt "$stale_seconds" ]; then '
+            'stale_dir="${lock_dir}.stale.$$"; '
+            'mv "$lock_dir" "$stale_dir" 2>/dev/null && rm -rf "$stale_dir"; '
+            "fi; "
+            "exit 1"
+        )
+
+    def _hardware_queue_release_command(self, token: str) -> str:
+        lock_dir = self._sh_quote(self.config.hardware_queue_dir)
+        token_q = self._sh_quote(token)
+        return (
+            f"lock_dir={lock_dir}; token={token_q}; "
+            'if [ "$(cat "$lock_dir/token" 2>/dev/null)" = "$token" ]; then '
+            'rm -rf "$lock_dir"; '
+            "fi"
+        )
 
     def read(self, row: int, col: int = 0) -> CellOperationResult:
         cell = CellAddress(row, col)

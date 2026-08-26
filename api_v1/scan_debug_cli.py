@@ -53,6 +53,12 @@ def build_config(args: argparse.Namespace) -> ScanDebugConfig:
         dac_teensy_loader=args.dac_teensy_loader,
         dac_teensy_mcu=args.dac_teensy_mcu,
         dac_teensy_hex=args.dac_teensy_hex,
+        hardware_queue_enabled=not args.disable_hardware_queue,
+        hardware_queue_host=args.hardware_queue_host or None,
+        hardware_queue_dir=args.hardware_queue_dir,
+        hardware_queue_timeout_seconds=args.hardware_queue_timeout_seconds,
+        hardware_queue_poll_seconds=args.hardware_queue_poll_seconds,
+        hardware_queue_stale_seconds=args.hardware_queue_stale_seconds,
         burst_initial_delay_cycles=args.burst_initial_delay_cycles,
         burst_repeat_after_done_cycles=args.burst_repeat_cycles,
         burst_capture_strategy=args.burst_capture_strategy,
@@ -161,28 +167,35 @@ def main() -> int:
     parser.add_argument("--dac-teensy-loader", default=os.environ.get("SCAN_DEBUG_DAC_TEENSY_LOADER", "/home/ubuntu-24-04/teensy-tools-src/teensy_loader_cli_serial/teensy_loader_cli"))
     parser.add_argument("--dac-teensy-mcu", default=os.environ.get("SCAN_DEBUG_DAC_TEENSY_MCU", "TEENSY41"))
     parser.add_argument("--dac-teensy-hex", default=os.environ.get("SCAN_DEBUG_DAC_TEENSY_HEX", "/home/ubuntu-24-04/teensy-flash/build-DAC_analog_vltgs/DAC_analog_vltgs.ino.hex"))
+    parser.add_argument("--disable-hardware-queue", action="store_true", default=os.environ.get("SCAN_DEBUG_DISABLE_HARDWARE_QUEUE", "0") == "1")
+    parser.add_argument("--hardware-queue-host", default=os.environ.get("SCAN_DEBUG_HARDWARE_QUEUE_HOST", ""))
+    parser.add_argument("--hardware-queue-dir", default=os.environ.get("SCAN_DEBUG_HARDWARE_QUEUE_DIR", "/tmp/scan_debug_hardware_queue.lock"))
+    parser.add_argument("--hardware-queue-timeout-seconds", type=float, default=float(os.environ.get("SCAN_DEBUG_HARDWARE_QUEUE_TIMEOUT_SECONDS", "86400")))
+    parser.add_argument("--hardware-queue-poll-seconds", type=float, default=float(os.environ.get("SCAN_DEBUG_HARDWARE_QUEUE_POLL_SECONDS", "5")))
+    parser.add_argument("--hardware-queue-stale-seconds", type=float, default=float(os.environ.get("SCAN_DEBUG_HARDWARE_QUEUE_STALE_SECONDS", "43200")))
     args = parser.parse_args()
     if args.operation not in {"read-array", "build-array-bitstreams"} and args.row is None:
         parser.error("--row is required unless operation is read-array or build-array-bitstreams")
 
     api = ScanDebugCellAPI(build_config(args))
-    if args.operation == "read":
-        result = api.read(args.row, args.col)
-    elif args.operation == "set":
-        result = api.set_cell(args.row, args.col)
-    elif args.operation == "reset":
-        result = api.reset_cell(args.row, args.col)
-    elif args.operation == "cycle":
-        result = api.cycle_cell(args.row, args.col)
-    elif args.operation == "read-array":
-        result = api.read_array(args.row_start, args.row_end, args.col_start, args.col_end, mode=args.array_mode)
-    else:
-        result = api.prebuild_array_column_bitstreams(
-            row_start=args.row_start,
-            col_start=args.col_start,
-            col_end=args.col_end,
-            force=args.force_bitstreams,
-        )
+    with api.hardware_queue(args.operation):
+        if args.operation == "read":
+            result = api.read(args.row, args.col)
+        elif args.operation == "set":
+            result = api.set_cell(args.row, args.col)
+        elif args.operation == "reset":
+            result = api.reset_cell(args.row, args.col)
+        elif args.operation == "cycle":
+            result = api.cycle_cell(args.row, args.col)
+        elif args.operation == "read-array":
+            result = api.read_array(args.row_start, args.row_end, args.col_start, args.col_end, mode=args.array_mode)
+        else:
+            result = api.prebuild_array_column_bitstreams(
+                row_start=args.row_start,
+                col_start=args.col_start,
+                col_end=args.col_end,
+                force=args.force_bitstreams,
+            )
     print(json.dumps(result if isinstance(result, dict) else result.__dict__, default=lambda item: item.__dict__, indent=2))
     return 0
 

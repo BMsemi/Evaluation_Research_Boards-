@@ -28,12 +28,18 @@ GRID_SIZE = 32
 try:
     from api_v1.cell_api import ScanDebugConfig
 
+    _DEFAULT_SCAN_CONFIG = ScanDebugConfig()
     DEFAULT_THRESHOLDS_UA = {
-        "set": ScanDebugConfig().set_sweep.threshold_uA,
-        "reset": ScanDebugConfig().reset_sweep.threshold_uA,
+        "set": _DEFAULT_SCAN_CONFIG.set_sweep.threshold_uA,
+        "reset": _DEFAULT_SCAN_CONFIG.reset_sweep.threshold_uA,
+    }
+    DEFAULT_SWEEP_PULSE_COUNTS = {
+        "set": len(_DEFAULT_SCAN_CONFIG.set_sweep.vcc_set_v) * len(_DEFAULT_SCAN_CONFIG.set_sweep.vcc_wl_set_v),
+        "reset": len(_DEFAULT_SCAN_CONFIG.reset_sweep.vcc_set_v) * len(_DEFAULT_SCAN_CONFIG.reset_sweep.vcc_wl_set_v),
     }
 except Exception:
     DEFAULT_THRESHOLDS_UA = {"set": 200.0, "reset": 130.0}
+    DEFAULT_SWEEP_PULSE_COUNTS = {"set": 112, "reset": 40}
 
 
 @dataclass(frozen=True)
@@ -367,20 +373,27 @@ def _sweep_resume_info(run_dir: Path, rows: list[dict[str, Any]]) -> dict[str, A
     if operation not in {"set", "reset"}:
         return {"isSweepRun": False, "canResume": False}
     cell = next((row.get("cellAddress") for row in reversed(rows) if row.get("cellAddress")), None)
-    completed = [
-        row
+    completed_rails = {
+        (row.get("vcc_set_V"), row.get("vcc_wl_set_V"))
         for row in rows
         if row.get("operation") == operation
         and row.get("ok")
         and row.get("cellAddress") == cell
-    ]
+        and row.get("vcc_set_V") is not None
+        and row.get("vcc_wl_set_V") is not None
+    }
+    total_pulses = DEFAULT_SWEEP_PULSE_COUNTS[operation]
+    completed_pulses = len(completed_rails)
+    remaining_pulses = max(0, total_pulses - completed_pulses)
     return {
         "isSweepRun": True,
-        "canResume": bool(cell) and bool(completed),
+        "canResume": bool(cell) and completed_pulses > 0 and remaining_pulses > 0,
         "operation": operation,
         "row": cell.get("row") if isinstance(cell, dict) else None,
         "col": cell.get("col") if isinstance(cell, dict) else None,
-        "completedPulses": len(completed),
+        "completedPulses": completed_pulses,
+        "remainingPulses": remaining_pulses,
+        "totalPulses": total_pulses,
     }
 
 

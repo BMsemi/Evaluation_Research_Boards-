@@ -1,3 +1,5 @@
+import base64
+import subprocess
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -68,6 +70,46 @@ class CaptureCopyTests(unittest.TestCase):
             api.runner.run.assert_called_once_with(
                 ["scp.exe", "-r", "user@example.test:/remote/capture/.", str(local)]
             )
+
+
+class SaleaeScriptUploadTests(unittest.TestCase):
+    def test_large_script_is_uploaded_in_windows_safe_chunks(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            api = ScanDebugCellAPI(ScanDebugConfig(run_dir=Path(temp_dir), dry_run=True))
+            commands: list[str] = []
+
+            def run_saleae(command: str, timeout_s: int | None = None) -> subprocess.CompletedProcess[str]:
+                commands.append(command)
+                return subprocess.CompletedProcess(command, 0, "", "")
+
+            api._run_saleae = run_saleae  # type: ignore[method-assign]
+            text = "large burst script\n" * 5_000
+
+            api._write_remote_saleae_text("run_full_array_burst_capture.py", text)
+
+            append_commands = [command for command in commands if command.startswith("printf %s ")]
+            chunks = [command.split("printf %s ", 1)[1].split(" >> ", 1)[0].strip("'") for command in append_commands]
+            self.assertEqual("".join(chunks), base64.b64encode(text.encode()).decode())
+            self.assertLess(max(map(len, commands)), 8_500)
+            self.assertTrue(commands[0].startswith(": > "))
+            self.assertIn("base64 -d", commands[-1])
+            self.assertIn("&& mv ", commands[-1])
+
+
+class HardwareQueueTests(unittest.TestCase):
+    def test_acquire_accepts_verified_lock_after_ssh_return_timeout(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            api = ScanDebugCellAPI(ScanDebugConfig(run_dir=Path(temp_dir), dry_run=False))
+            api.runner = Mock()
+            api.runner.ssh.side_effect = [
+                subprocess.TimeoutExpired(["ssh"], 20),
+                subprocess.CompletedProcess(["ssh"], 0, "queue-token\n", ""),
+            ]
+
+            api._acquire_hardware_queue("user@example.test", "queue-token", "owner", "set")
+
+            self.assertEqual(api.runner.ssh.call_count, 2)
+            self.assertIn("/token", api.runner.ssh.call_args_list[1].args[1])
 
 
 if __name__ == "__main__":

@@ -10,7 +10,7 @@ The API keeps the experiment behavior used in the recent stair-pulse runs:
 
 - every packet programs the FPGA bitstream for the selected cell and mode;
 - FPGA asserts Caravel reset before sending the packet;
-- read verification uses `Vcc_set=1.0 V`, `Vcc_wl_set=2.5 V` by default;
+- read verification uses `Vcc_set=0.9 V`, `Vcc_wl_set=2.5 V` by default;
 - set uses `OP_SET=1` and ramps rails until read current crosses the set threshold;
 - reset/read polarity uses `OP_SET=0` and ramps rails until read current crosses the reset threshold;
 - Saleae A12-A13 is treated as the set shunt current through `shunt_ohms`, default `470 ohms`.

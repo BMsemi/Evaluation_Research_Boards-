@@ -111,7 +111,7 @@ class SweepConfig:
 @dataclass
 class ScanDebugConfig:
     run_dir: Path = ROOT / "api_v1/runs/default"
-    read_rails: RailVoltages = field(default_factory=lambda: RailVoltages(1.0, 2.5))
+    read_rails: RailVoltages = field(default_factory=lambda: RailVoltages(0.9, 2.5))
     set_sweep: SweepConfig = field(
         default_factory=lambda: SweepConfig.from_ranges(
             vcc_set_v=(1.6, 2.0, 2.3, 2.4, 2.5, 2.8, 3.0),
@@ -383,7 +383,19 @@ class ScanDebugCellAPI:
         next_progress = 0.0
         while True:
             command = self._hardware_queue_acquire_command(token, owner)
-            proc = self.runner.ssh(host, command, timeout_s=20)
+            try:
+                proc = self.runner.ssh(host, command, timeout_s=20)
+            except subprocess.TimeoutExpired:
+                # The remote mkdir/write can complete even when the SSH session
+                # is slow to close (notably just after the Saleae VM reboots).
+                # Confirm this worker owns the lock before treating the return
+                # timeout as an acquisition failure.
+                token_path = self._sh_quote(self.config.hardware_queue_dir + "/token")
+                verify = self.runner.ssh(host, f"cat {token_path} 2>/dev/null || true", timeout_s=10)
+                if verify.returncode == 0 and verify.stdout.strip() == token:
+                    self._append_progress(operation, "Hardware queue lock acquired after SSH return timeout", queue="acquired")
+                    return
+                raise
             if proc.returncode == 0:
                 self._append_progress(operation, "Hardware queue lock acquired", queue="acquired")
                 return
@@ -1053,18 +1065,38 @@ exit
 
     def _write_remote_saleae_text(self, filename: str, text: str) -> None:
         encoded = base64.b64encode(text.encode()).decode()
-        command = (
-            f"python3 - <<'PY'\n"
-            f"import base64, pathlib\n"
-            f"pathlib.Path({filename!r}).write_bytes(base64.b64decode({encoded!r}))\n"
-            f"PY"
-        )
+        # Keep each ssh invocation comfortably below Windows' CreateProcess
+        # command-line limit.  The burst script is large enough that embedding
+        # the complete base64 payload in one ssh command raises WinError 206.
+        chunk_chars = 8_000
+        upload_id = uuid.uuid4().hex
+        b64_name = f".{filename}.{upload_id}.b64tmp"
+        upload_name = f".{filename}.{upload_id}.upload"
+        b64_q = self._sh_quote(b64_name)
+        upload_q = self._sh_quote(upload_name)
+        filename_q = self._sh_quote(filename)
         last_output = ""
         for attempt in range(1, 4):
-            proc = self._run_saleae(command, timeout_s=60)
+            proc = self._run_saleae(f": > {b64_q}", timeout_s=60)
+            if proc.returncode == 0:
+                for offset in range(0, len(encoded), chunk_chars):
+                    chunk = encoded[offset:offset + chunk_chars]
+                    proc = self._run_saleae(
+                        f"printf %s {self._sh_quote(chunk)} >> {b64_q}",
+                        timeout_s=60,
+                    )
+                    if proc.returncode != 0:
+                        break
+            if proc.returncode == 0:
+                proc = self._run_saleae(
+                    f"base64 -d {b64_q} > {upload_q} && "
+                    f"mv {upload_q} {filename_q} && rm -f {b64_q}",
+                    timeout_s=60,
+                )
             if proc.returncode == 0:
                 return
-            last_output = proc.stdout
+            last_output = proc.stdout or f"remote upload failed with exit code {proc.returncode}"
+            self._run_saleae(f"rm -f {b64_q} {upload_q}", timeout_s=60)
             if attempt < 3:
                 time.sleep(2.0)
         raise RuntimeError(last_output)
@@ -1661,7 +1693,15 @@ PY
         if self.config.zynq_os == "windows":
             command = (
                 f"Copy-Item -Force {bitstream} caravel_scan_debug_fpga.bit; "
-                f"{self.config.vivado_cmd} -mode batch -source program_scan_debug_zynq7020.tcl"
+                f"& '{self.config.vivado_cmd}' -mode batch -source program_scan_debug_zynq7020.tcl "
+                "*> vivado_api_program.log; "
+                "$vivado_exit = $LASTEXITCODE; "
+                # Vivado can leave child processes holding the SSH session's stdout handle
+                # after batch programming has finished. Redirect native output to a remote
+                # log and terminate hw_server so ssh exits instead of falsely timing out.
+                "Get-Process hw_server -ErrorAction SilentlyContinue | Stop-Process -Force; "
+                "Write-Output ('VIVADO_EXIT=' + $vivado_exit); "
+                "exit $vivado_exit"
             )
             proc = self._run_zynq_powershell(command, timeout_s=180)
         else:
